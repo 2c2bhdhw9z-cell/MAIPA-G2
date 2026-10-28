@@ -524,9 +524,8 @@ public final class OpenRouterService: @unchecked Sendable {
                     }
                 }
 
-                // Answer 11: Automatically check repo GitHub Actions builds when enabled
-                if settings.autoCheckRepoBuildsEnabled,
-                   let runs = try? await githubService.fetchWorkflowRuns(fullName: repoFullName, token: githubToken),
+                // Answer 11: Automatically check repo GitHub Actions builds when connected to a repo
+                if let runs = try? await githubService.fetchWorkflowRuns(fullName: repoFullName, token: githubToken),
                    let latestRun = runs.first {
                     let buildSummary = "Latest build #\(latestRun.runNumber) (\(latestRun.name)): \(latestRun.status) \(latestRun.conclusion ?? "")"
                     let buildStep = ToolCallItem(
@@ -560,6 +559,7 @@ public final class OpenRouterService: @unchecked Sendable {
            let repoFullName = thread.repoFullName, !repoFullName.isEmpty,
            let token = githubToken, !token.isEmpty {
             let branch = thread.branchName ?? "main"
+            let jobId = "job-\(UUID().uuidString.prefix(8))"
             var cloudStep = ToolCallItem(
                 toolName: "autonomous_cloud_job",
                 summaryLine: "Starting autonomous cloud job on GitHub (\(repoFullName))",
@@ -568,15 +568,14 @@ public final class OpenRouterService: @unchecked Sendable {
             )
             onToolStepUpdate?(cloudStep)
             do {
-                let msg = try await githubService.ensureAutonomousCallerWorkflowAndRun(
+                try await githubService.ensureAutonomousCallerWorkflowAndRun(
                     fullName: repoFullName,
                     branch: branch,
-                    taskPrompt: userPrompt,
-                    modelId: route.effectiveModelId,
+                    jobId: jobId,
                     token: token
                 )
-                cloudStep.summaryLine = "Autonomous job running on GitHub's computers"
-                cloudStep.outputDetail = msg
+                cloudStep.summaryLine = "Autonomous job (\(jobId)) running on GitHub's computers"
+                cloudStep.outputDetail = "Dispatched .github/workflows/maipa-g.yml -> autonomous-runner.yml for \(repoFullName) (\(branch))."
                 cloudStep.status = .completed
                 cloudStep.finishedAt = Date()
                 recordedTools.append(cloudStep)
