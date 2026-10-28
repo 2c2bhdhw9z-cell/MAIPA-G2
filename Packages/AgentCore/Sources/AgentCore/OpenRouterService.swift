@@ -384,10 +384,11 @@ public final class OpenRouterService: @unchecked Sendable {
         }
 
         // Check if URL is in prompt -> Read a web page tool (Answer 26)
-        if let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) {
-            let matches = detector.matches(in: userPrompt, options: [], range: NSRange(userPrompt.startIndex..., in: userPrompt))
+        if let urlRegex = try? NSRegularExpression(pattern: "https?://[^\\s\\)\\\"\\>]+", options: [.caseInsensitive]) {
+            let matches = urlRegex.matches(in: userPrompt, options: [], range: NSRange(userPrompt.startIndex..., in: userPrompt))
             for match in matches.prefix(2) {
-                if let url = match.url {
+                if let range = Range(match.range, in: userPrompt),
+                   let url = URL(string: String(userPrompt[range])) {
                     var pageStep = ToolCallItem(
                         toolName: "read_web_page",
                         summaryLine: "Read web page \(url.host ?? url.absoluteString)",
