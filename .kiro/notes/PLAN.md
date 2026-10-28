@@ -1,6 +1,6 @@
 # MAIPA-G plan
 
-**Status (28 October 2026, afternoon Eastern): Build 1 (Home screen, Connect GitHub, repo and branch pickers, Sign in with OpenRouter, Auto and thinking AI picker, repo-reading and searching chat, side menu, Files viewer, Settings, and .ipa build pipeline) is built.**
+**Status (28 October 2026, evening Eastern): Builds 1–5 complete (Starts not connected to a repo, hides unused connectors on Home, 40,000+ Official MCP Registry live search + 32+ built-in connectors, code editing & saving with side-branch PR "Add it" / "Throw away" and 1-tap Undo, Photos & Files attachments, free web search & page reader, GitHub Actions build runner & checker, tappable Agents & Workflow maker, Spec mode with `.kiro/specs/` saving, Memories editor & AI auto-save, Chat groups, and Live Web Previews).**
 
 ## What it is
 An iPhone app (.ipa) for AI agents and workflows, with GitHub built in, like Kiro (app.kiro.dev)

@@ -28,6 +28,7 @@ public struct AIModelOption: Identifiable, Codable, Equatable, Sendable {
     public let provider: String
     public let isFree: Bool
     public let supportsThinking: Bool
+    public let supportsImages: Bool
     public let inputPricePerMillion: Double
     public let outputPricePerMillion: Double
     public let summary: String
@@ -38,6 +39,7 @@ public struct AIModelOption: Identifiable, Codable, Equatable, Sendable {
         provider: String,
         isFree: Bool,
         supportsThinking: Bool,
+        supportsImages: Bool = false,
         inputPricePerMillion: Double,
         outputPricePerMillion: Double,
         summary: String
@@ -47,6 +49,7 @@ public struct AIModelOption: Identifiable, Codable, Equatable, Sendable {
         self.provider = provider
         self.isFree = isFree
         self.supportsThinking = supportsThinking
+        self.supportsImages = supportsImages
         self.inputPricePerMillion = inputPricePerMillion
         self.outputPricePerMillion = outputPricePerMillion
         self.summary = summary
@@ -59,6 +62,7 @@ public struct AIModelOption: Identifiable, Codable, Equatable, Sendable {
             provider: "MAIPA-G",
             isFree: false,
             supportsThinking: true,
+            supportsImages: true,
             inputPricePerMillion: 0.0,
             outputPricePerMillion: 0.0,
             summary: "Picks the right AI for each job: cheap or free for small things, smarter ones for hard work. Uses only free AIs when your balance is $0."
@@ -69,6 +73,7 @@ public struct AIModelOption: Identifiable, Codable, Equatable, Sendable {
             provider: "OpenRouter",
             isFree: true,
             supportsThinking: true,
+            supportsImages: false,
             inputPricePerMillion: 0.0,
             outputPricePerMillion: 0.0,
             summary: "Always $0. Picks the best free model that supports the tools your chat needs."
@@ -79,6 +84,7 @@ public struct AIModelOption: Identifiable, Codable, Equatable, Sendable {
             provider: "Apple",
             isFree: true,
             supportsThinking: false,
+            supportsImages: false,
             inputPricePerMillion: 0.0,
             outputPricePerMillion: 0.0,
             summary: "Runs straight on your iPhone at $0. Great for chat titles and quick notes."
@@ -89,6 +95,7 @@ public struct AIModelOption: Identifiable, Codable, Equatable, Sendable {
             provider: "Anthropic",
             isFree: false,
             supportsThinking: true,
+            supportsImages: true,
             inputPricePerMillion: 4.0,
             outputPricePerMillion: 20.0,
             summary: "Deep planning, hard debugging, and thorough code checks ($4 / $20 per 1M tokens)."
@@ -99,6 +106,7 @@ public struct AIModelOption: Identifiable, Codable, Equatable, Sendable {
             provider: "Anthropic",
             isFree: false,
             supportsThinking: true,
+            supportsImages: true,
             inputPricePerMillion: 2.0,
             outputPricePerMillion: 10.0,
             summary: "Fast everyday coding and repo work ($2 / $10 per 1M tokens)."
@@ -109,6 +117,7 @@ public struct AIModelOption: Identifiable, Codable, Equatable, Sendable {
             provider: "Anthropic",
             isFree: false,
             supportsThinking: false,
+            supportsImages: true,
             inputPricePerMillion: 0.10,
             outputPricePerMillion: 0.50,
             summary: "Quick searches and light tasks ($0.10 / $0.50 per 1M tokens)."
@@ -119,6 +128,7 @@ public struct AIModelOption: Identifiable, Codable, Equatable, Sendable {
             provider: "DeepSeek",
             isFree: true,
             supportsThinking: true,
+            supportsImages: false,
             inputPricePerMillion: 0.0,
             outputPricePerMillion: 0.0,
             summary: "Free reasoning model with step-by-step thinking."
@@ -129,14 +139,37 @@ public struct AIModelOption: Identifiable, Codable, Equatable, Sendable {
             provider: "Google",
             isFree: true,
             supportsThinking: true,
+            supportsImages: true,
             inputPricePerMillion: 0.0,
             outputPricePerMillion: 0.0,
             summary: "Large context window for reading whole repositories at $0."
+        ),
+        AIModelOption(
+            id: "openai/gpt-5-mini",
+            name: "GPT-5 Mini",
+            provider: "OpenAI",
+            isFree: false,
+            supportsThinking: true,
+            supportsImages: true,
+            inputPricePerMillion: 0.25,
+            outputPricePerMillion: 2.0,
+            summary: "Fast multi-modal coding and second-opinion reviews."
+        ),
+        AIModelOption(
+            id: "black-forest-labs/flux-1-schnell:free",
+            name: "FLUX.1 Picture Maker",
+            provider: "OpenRouter Images",
+            isFree: true,
+            supportsThinking: false,
+            supportsImages: true,
+            inputPricePerMillion: 0.0,
+            outputPricePerMillion: 0.0,
+            summary: "Generates icons, mockups, and pictures through OpenRouter."
         )
     ]
 }
 
-// MARK: - GitHub Models
+// MARK: - GitHub Models (Repos, Branches, Tree, Saved Changes, PRs, Actions Runs)
 
 public struct GitHubRepo: Identifiable, Codable, Equatable, Hashable, Sendable {
     public let id: Int
@@ -200,6 +233,213 @@ public struct GitHubTreeItem: Identifiable, Codable, Equatable, Hashable, Sendab
         self.type = type
         self.size = size
         self.sha = sha
+    }
+}
+
+public struct RepoFileEditOperation: Identifiable, Codable, Equatable, Sendable {
+    public enum OperationKind: String, Codable, Sendable {
+        case update = "update"
+        case create = "create"
+        case delete = "delete"
+    }
+
+    public let id: String
+    public let path: String
+    public let kind: OperationKind
+    public let content: String?
+
+    public init(id: String = UUID().uuidString, path: String, kind: OperationKind, content: String? = nil) {
+        self.id = id
+        self.path = path
+        self.kind = kind
+        self.content = content
+    }
+}
+
+/// Tracks a saved change or Pull Request created by an agent so the user can tap:
+/// - "Add it" (squash-merge PR into default branch, then delete side branch)
+/// - "Throw away" (close PR and delete side branch)
+/// - "Undo" (revert the branch back to `previousCommitSha`)
+public struct SavedChangeReceipt: Identifiable, Codable, Equatable, Sendable {
+    public enum ResolutionState: String, Codable, Sendable {
+        case pendingPR = "pending_pr"
+        case savedDirect = "saved_direct"
+        case merged = "merged"
+        case thrownAway = "thrown_away"
+        case undone = "undone"
+    }
+
+    public let id: String
+    public let repoFullName: String
+    public let baseBranch: String
+    public let workingBranch: String
+    public let commitSha: String
+    public let previousCommitSha: String
+    public let commitMessage: String
+    public let changedPaths: [String]
+    public let prNumber: Int?
+    public let prURL: String?
+    public var state: ResolutionState
+    public let createdAt: Date
+
+    public init(
+        id: String = UUID().uuidString,
+        repoFullName: String,
+        baseBranch: String,
+        workingBranch: String,
+        commitSha: String,
+        previousCommitSha: String,
+        commitMessage: String,
+        changedPaths: [String],
+        prNumber: Int? = nil,
+        prURL: String? = nil,
+        state: ResolutionState,
+        createdAt: Date = Date()
+    ) {
+        self.id = id
+        self.repoFullName = repoFullName
+        self.baseBranch = baseBranch
+        self.workingBranch = workingBranch
+        self.commitSha = commitSha
+        self.previousCommitSha = previousCommitSha
+        self.commitMessage = commitMessage
+        self.changedPaths = changedPaths
+        self.prNumber = prNumber
+        self.prURL = prURL
+        self.state = state
+        self.createdAt = createdAt
+    }
+}
+
+public struct GitHubWorkflowRunItem: Identifiable, Codable, Equatable, Sendable {
+    public let id: Int
+    public let runNumber: Int
+    public let name: String
+    public let headBranch: String
+    public let headSha: String
+    public let status: String // "queued", "in_progress", "completed"
+    public let conclusion: String? // "success", "failure", "cancelled"
+    public let htmlURL: String
+    public let createdAt: String
+
+    public init(
+        id: Int,
+        runNumber: Int,
+        name: String,
+        headBranch: String,
+        headSha: String,
+        status: String,
+        conclusion: String?,
+        htmlURL: String,
+        createdAt: String
+    ) {
+        self.id = id
+        self.runNumber = runNumber
+        self.name = name
+        self.headBranch = headBranch
+        self.headSha = headSha
+        self.status = status
+        self.conclusion = conclusion
+        self.htmlURL = htmlURL
+        self.createdAt = createdAt
+    }
+}
+
+// MARK: - Attachments & Spec Mode Models
+
+public struct ChatAttachmentItem: Identifiable, Codable, Equatable, Sendable {
+    public enum AttachmentKind: String, Codable, Sendable {
+        case photo = "photo"
+        case file = "file"
+        case repoFile = "repo_file"
+    }
+
+    public let id: String
+    public let name: String
+    public let kind: AttachmentKind
+    public let mimeType: String
+    public let textPreview: String?
+    public let base64Data: String?
+    public let sizeBytes: Int
+
+    public init(
+        id: String = UUID().uuidString,
+        name: String,
+        kind: AttachmentKind,
+        mimeType: String = "text/plain",
+        textPreview: String? = nil,
+        base64Data: String? = nil,
+        sizeBytes: Int = 0
+    ) {
+        self.id = id
+        self.name = name
+        self.kind = kind
+        self.mimeType = mimeType
+        self.textPreview = textPreview
+        self.base64Data = base64Data
+        self.sizeBytes = sizeBytes
+    }
+}
+
+public struct SpecTaskItem: Identifiable, Codable, Equatable, Sendable {
+    public let id: String
+    public var number: Int
+    public var title: String
+    public var isCompleted: Bool
+
+    public init(id: String = UUID().uuidString, number: Int, title: String, isCompleted: Bool = false) {
+        self.id = id
+        self.number = number
+        self.title = title
+        self.isCompleted = isCompleted
+    }
+}
+
+/// Kiro's 3-step Spec flow (Item 6 & Answer 25):
+/// 1. What it'll build (Requirements) -> User taps OK
+/// 2. How it works (Design) -> User taps OK
+/// 3. Task list -> User OKs and works down the list, saved to `.kiro/specs/<slug>/`
+public struct SpecPlanDocument: Identifiable, Codable, Equatable, Sendable {
+    public enum SpecStage: String, Codable, Sendable {
+        case whatItWillBuild = "what"
+        case howItWorks = "how"
+        case taskChecklist = "tasks"
+        case building = "building"
+    }
+
+    public let id: String
+    public var slug: String
+    public var title: String
+    public var whatItWillBuild: String
+    public var howItWorks: String
+    public var tasks: [SpecTaskItem]
+    public var stage: SpecStage
+    public var whatApproved: Bool
+    public var howApproved: Bool
+    public var tasksApproved: Bool
+
+    public init(
+        id: String = UUID().uuidString,
+        slug: String,
+        title: String,
+        whatItWillBuild: String,
+        howItWorks: String,
+        tasks: [SpecTaskItem],
+        stage: SpecStage = .whatItWillBuild,
+        whatApproved: Bool = false,
+        howApproved: Bool = false,
+        tasksApproved: Bool = false
+    ) {
+        self.id = id
+        self.slug = slug
+        self.title = title
+        self.whatItWillBuild = whatItWillBuild
+        self.howItWorks = howItWorks
+        self.tasks = tasks
+        self.stage = stage
+        self.whatApproved = whatApproved
+        self.howApproved = howApproved
+        self.tasksApproved = tasksApproved
     }
 }
 
@@ -279,6 +519,10 @@ public struct ChatMessage: Identifiable, Codable, Equatable, Sendable {
     public var costUSD: Double
     public var toolCalls: [ToolCallItem]
     public var questions: [NumberedQuestionItem]
+    public var attachments: [ChatAttachmentItem]
+    public var savedChangeReceipt: SavedChangeReceipt?
+    public var autoSavedMemories: [String]
+    public var generatedImageURL: String?
     public var isStarredAsMemory: Bool
     public var stopAndAskTriggered: Bool
 
@@ -291,6 +535,10 @@ public struct ChatMessage: Identifiable, Codable, Equatable, Sendable {
         costUSD: Double = 0.0,
         toolCalls: [ToolCallItem] = [],
         questions: [NumberedQuestionItem] = [],
+        attachments: [ChatAttachmentItem] = [],
+        savedChangeReceipt: SavedChangeReceipt? = nil,
+        autoSavedMemories: [String] = [],
+        generatedImageURL: String? = nil,
         isStarredAsMemory: Bool = false,
         stopAndAskTriggered: Bool = false
     ) {
@@ -302,6 +550,10 @@ public struct ChatMessage: Identifiable, Codable, Equatable, Sendable {
         self.costUSD = costUSD
         self.toolCalls = toolCalls
         self.questions = questions
+        self.attachments = attachments
+        self.savedChangeReceipt = savedChangeReceipt
+        self.autoSavedMemories = autoSavedMemories
+        self.generatedImageURL = generatedImageURL
         self.isStarredAsMemory = isStarredAsMemory
         self.stopAndAskTriggered = stopAndAskTriggered
     }
@@ -330,6 +582,10 @@ public struct ChatThread: Identifiable, Codable, Equatable, Sendable {
     public var isAutonomous: Bool
     public var webSearchEnabled: Bool
     public var specModeEnabled: Bool
+    public var activeAgentId: String?
+    public var activeWorkflowId: String?
+    public var specDocument: SpecPlanDocument?
+    public var lastSavedReceipt: SavedChangeReceipt?
     public var messages: [ChatMessage]
     public var totalCostUSD: Double
     public let createdAt: Date
@@ -346,6 +602,10 @@ public struct ChatThread: Identifiable, Codable, Equatable, Sendable {
         isAutonomous: Bool = false,
         webSearchEnabled: Bool = false,
         specModeEnabled: Bool = false,
+        activeAgentId: String? = nil,
+        activeWorkflowId: String? = nil,
+        specDocument: SpecPlanDocument? = nil,
+        lastSavedReceipt: SavedChangeReceipt? = nil,
         messages: [ChatMessage] = [],
         totalCostUSD: Double = 0.0,
         createdAt: Date = Date(),
@@ -361,6 +621,10 @@ public struct ChatThread: Identifiable, Codable, Equatable, Sendable {
         self.isAutonomous = isAutonomous
         self.webSearchEnabled = webSearchEnabled
         self.specModeEnabled = specModeEnabled
+        self.activeAgentId = activeAgentId
+        self.activeWorkflowId = activeWorkflowId
+        self.specDocument = specDocument
+        self.lastSavedReceipt = lastSavedReceipt
         self.messages = messages
         self.totalCostUSD = totalCostUSD
         self.createdAt = createdAt
@@ -368,7 +632,7 @@ public struct ChatThread: Identifiable, Codable, Equatable, Sendable {
     }
 }
 
-// MARK: - Memories, Agents, Workflows, and Settings
+// MARK: - Memories, Agents, Workflows, MCP Connectors, and Settings
 
 public enum MemorySource: String, Codable, Sendable {
     case star = "★ from chat"
@@ -438,57 +702,143 @@ public struct WorkflowPreset: Identifiable, Codable, Equatable, Sendable {
     public var name: String
     public var summary: String
     public var steps: [String]
+    public var maxLoopCount: Int
+    public var hasStopAndAskStep: Bool
     public let isBuiltIn: Bool
 
-    public init(id: String, name: String, summary: String, steps: [String], isBuiltIn: Bool = true) {
+    public init(
+        id: String,
+        name: String,
+        summary: String,
+        steps: [String],
+        maxLoopCount: Int = 1,
+        hasStopAndAskStep: Bool = false,
+        isBuiltIn: Bool = true
+    ) {
         self.id = id
         self.name = name
         self.summary = summary
         self.steps = steps
+        self.maxLoopCount = maxLoopCount
+        self.hasStopAndAskStep = hasStopAndAskStep
         self.isBuiltIn = isBuiltIn
     }
 
     public static let kiroBuiltIns: [WorkflowPreset] = [
         WorkflowPreset(id: "look-into", name: "Look into something", summary: "Reads the repo and explains how something works or why a bug happens.", steps: ["Investigator"]),
-        WorkflowPreset(id: "keep-going", name: "Keep going until a goal is met", summary: "Works in a loop and checks its own result until the goal passes.", steps: ["Coder", "Code checker", "Builder"]),
+        WorkflowPreset(id: "keep-going", name: "Keep going until a goal is met", summary: "Works in a loop and checks its own result until the goal passes.", steps: ["Coder", "Code checker", "Builder"], maxLoopCount: 3),
         WorkflowPreset(id: "checklist", name: "Work through a checklist", summary: "Checks off each item in your list one by one.", steps: ["Planner", "Coder", "Code checker"]),
-        WorkflowPreset(id: "full-feature", name: "Full feature", summary: "Requirements, design, checked design, plan, build with a two-AI review, and final check.", steps: ["Planner", "Designer", "Design checker", "Coder", "Code checker", "Second opinion", "Review combiner"]),
+        WorkflowPreset(id: "full-feature", name: "Full feature", summary: "Requirements, design, checked design, plan, build with a two-AI review, and final check.", steps: ["Planner", "Designer", "Design checker", "Coder", "Code checker", "Second opinion", "Review combiner"], hasStopAndAskStep: true),
         WorkflowPreset(id: "two-ai-review", name: "Two-AI review", summary: "Two different AIs check the code and combine their notes.", steps: ["Code checker", "Second opinion", "Review combiner"]),
-        WorkflowPreset(id: "experiment", name: "Experiment until it's better", summary: "Tries changes and keeps what works best.", steps: ["Researcher", "Code checker"]),
+        WorkflowPreset(id: "experiment", name: "Experiment until it's better", summary: "Tries changes and keeps what works best.", steps: ["Researcher", "Code checker"], maxLoopCount: 3),
         WorkflowPreset(id: "send-pr", name: "Send a side copy for review", summary: "Saves changes to a side branch and opens a pull request.", steps: ["Request sender", "Feedback answerer"]),
         WorkflowPreset(id: "build-ipa", name: "Build and check the .ipa", summary: "Starts the iOS build on GitHub and verifies the .ipa bundle.", steps: ["Builder"])
     ]
 }
 
+public enum MCPConnectorCategory: String, Codable, CaseIterable, Sendable {
+    case codeAndDev = "Code & Build"
+    case cloudAndDB = "Cloud & Databases"
+    case searchAndWeb = "Search & Research"
+    case chatAndTeam = "Chat & Issues"
+    case designAndMedia = "Design & Media"
+    case docsAndFiles = "Docs & Storage"
+    case googleWorkspace = "Google Workspace"
+    case automationAndHome = "Automation & Daily"
+    case officialRegistry = "MCP Registry"
+}
+
 public struct MCPConnectorItem: Identifiable, Codable, Equatable, Sendable {
     public let id: String
-    public let name: String
-    public let iconName: String
-    public let summary: String
-    public let isPopular: Bool
+    public var name: String
+    public var iconName: String
+    public var category: MCPConnectorCategory
+    public var summary: String
+    public var serverURL: String?
+    public var requiresWebsiteSetupNote: String?
+    public var isPopular: Bool
     public var isConnected: Bool
 
-    public init(id: String, name: String, iconName: String, summary: String, isPopular: Bool = true, isConnected: Bool = false) {
+    public init(
+        id: String,
+        name: String,
+        iconName: String,
+        category: MCPConnectorCategory = .codeAndDev,
+        summary: String,
+        serverURL: String? = nil,
+        requiresWebsiteSetupNote: String? = nil,
+        isPopular: Bool = true,
+        isConnected: Bool = false
+    ) {
         self.id = id
         self.name = name
         self.iconName = iconName
+        self.category = category
         self.summary = summary
+        self.serverURL = serverURL
+        self.requiresWebsiteSetupNote = requiresWebsiteSetupNote
         self.isPopular = isPopular
         self.isConnected = isConnected
     }
 
     public static let defaultConnectors: [MCPConnectorItem] = [
-        MCPConnectorItem(id: "github", name: "GitHub", iconName: "chevron.left.forwardslash.chevron.right", summary: "Repos, branches, pull requests, and .ipa builds"),
-        MCPConnectorItem(id: "google-drive", name: "Drive", iconName: "externaldrive.fill", summary: "Read and search files in your Google Drive"),
-        MCPConnectorItem(id: "google-docs", name: "Docs", iconName: "doc.text.fill", summary: "Read and write Google Docs"),
-        MCPConnectorItem(id: "notion", name: "Notion", iconName: "book.closed.fill", summary: "Pages, databases, and notes in Notion"),
-        MCPConnectorItem(id: "google-sheets", name: "Sheets", iconName: "tablecells.fill", summary: "Spreadsheets and tables in Google Sheets"),
-        MCPConnectorItem(id: "gmail", name: "Gmail", iconName: "envelope.fill", summary: "Search and draft emails in Gmail"),
-        MCPConnectorItem(id: "google-calendar", name: "Calendar", iconName: "calendar", summary: "Check events and schedules in Google Calendar"),
-        MCPConnectorItem(id: "slack", name: "Slack", iconName: "bubble.left.and.bubble.right.fill", summary: "Channels and messages in Slack"),
-        MCPConnectorItem(id: "linear", name: "Linear", iconName: "checklist", summary: "Issues and project tracking in Linear"),
-        MCPConnectorItem(id: "figma", name: "Figma", iconName: "paintbrush.pointed.fill", summary: "Inspect Figma designs and frames"),
-        MCPConnectorItem(id: "dropbox", name: "Dropbox", iconName: "shippingbox.fill", summary: "Files and folders in Dropbox")
+        // Code & Build
+        MCPConnectorItem(id: "github", name: "GitHub", iconName: "chevron.left.forwardslash.chevron.right", category: .codeAndDev, summary: "Repos, branches, pull requests, and .ipa builds"),
+        MCPConnectorItem(id: "gitlab", name: "GitLab", iconName: "chevron.left.forwardslash.chevron.right", category: .codeAndDev, summary: "GitLab repositories, merge requests, and CI pipelines", serverURL: "https://mcp.gitlab.com/sse"),
+        MCPConnectorItem(id: "sentry", name: "Sentry", iconName: "ladybug.fill", category: .codeAndDev, summary: "Crash reports, stack traces, and release health", serverURL: "https://mcp.sentry.dev/sse"),
+        MCPConnectorItem(id: "vercel", name: "Vercel", iconName: "triangle.fill", category: .codeAndDev, summary: "Deployments, preview links, and build logs", serverURL: "https://mcp.vercel.com/sse"),
+        MCPConnectorItem(id: "cloudflare", name: "Cloudflare", iconName: "cloud.fill", category: .codeAndDev, summary: "Workers, KV, D1, R2 storage, and DNS", serverURL: "https://mcp.cloudflare.com/sse"),
+        MCPConnectorItem(id: "docker", name: "Docker Hub", iconName: "shippingbox.and.arrow.backward.fill", category: .codeAndDev, summary: "Container images, tags, and build registries"),
+        MCPConnectorItem(id: "apple-docs", name: "Apple Developer Docs", iconName: "apple.logo", category: .codeAndDev, summary: "Swift, SwiftUI, Xcode, and iOS 17–26 documentation"),
+        MCPConnectorItem(id: "context7", name: "Context7 Library Docs", iconName: "books.vertical.fill", category: .codeAndDev, summary: "Up-to-date SDK and package documentation for coding"),
+
+        // Cloud & Databases
+        MCPConnectorItem(id: "supabase", name: "Supabase", iconName: "bolt.horizontal.fill", category: .cloudAndDB, summary: "Postgres tables, edge functions, and auth", serverURL: "https://mcp.supabase.com/sse"),
+        MCPConnectorItem(id: "neon", name: "Neon Postgres", iconName: "cylinder.split.1x2.fill", category: .cloudAndDB, summary: "Serverless Postgres branches and SQL queries", serverURL: "https://mcp.neon.tech/sse"),
+        MCPConnectorItem(id: "firebase", name: "Firebase", iconName: "flame.fill", category: .cloudAndDB, summary: "Firestore collections, rules, and Crashlytics"),
+        MCPConnectorItem(id: "upstash", name: "Upstash Redis", iconName: "memorychip.fill", category: .cloudAndDB, summary: "Serverless Redis queues and rate limits"),
+        MCPConnectorItem(id: "stripe", name: "Stripe", iconName: "creditcard.fill", category: .cloudAndDB, summary: "Payments, subscriptions, webhooks, and invoices", serverURL: "https://mcp.stripe.com/sse"),
+        MCPConnectorItem(id: "aws", name: "AWS Cloud", iconName: "server.rack", category: .cloudAndDB, summary: "S3 buckets, Lambda functions, and CloudWatch logs"),
+
+        // Search & Research
+        MCPConnectorItem(id: "brave-search", name: "Brave Search", iconName: "safari.fill", category: .searchAndWeb, summary: "Fast web and code search without tracking"),
+        MCPConnectorItem(id: "exa", name: "Exa Search", iconName: "sparkle.magnifyingglass", category: .searchAndWeb, summary: "Deep semantic search for papers, repos, and docs", serverURL: "https://mcp.exa.ai/sse"),
+        MCPConnectorItem(id: "perplexity", name: "Perplexity", iconName: "globe.americas.fill", category: .searchAndWeb, summary: "Cited web research and fact checking"),
+        MCPConnectorItem(id: "fetch-reader", name: "Web Page Reader", iconName: "doc.richtext", category: .searchAndWeb, summary: "Fetches any URL and turns it into clean readable text", isConnected: true),
+        MCPConnectorItem(id: "arxiv", name: "arXiv Papers", iconName: "graduationcap.fill", category: .searchAndWeb, summary: "Search and read research papers on arXiv"),
+        MCPConnectorItem(id: "wikipedia", name: "Wikipedia", iconName: "book.fill", category: .searchAndWeb, summary: "Instant encyclopedia lookup and article summaries"),
+
+        // Chat & Issues
+        MCPConnectorItem(id: "discord", name: "Discord", iconName: "gamecontroller.fill", category: .chatAndTeam, summary: "Servers, channels, webhooks, and bot messages"),
+        MCPConnectorItem(id: "linear", name: "Linear", iconName: "checklist", category: .chatAndTeam, summary: "Issues, cycles, and project roadmaps", serverURL: "https://mcp.linear.app/sse"),
+        MCPConnectorItem(id: "slack", name: "Slack", iconName: "bubble.left.and.bubble.right.fill", category: .chatAndTeam, summary: "Channels, threads, and messages in Slack", serverURL: "https://mcp.slack.com/sse"),
+        MCPConnectorItem(id: "jira", name: "Jira", iconName: "list.bullet.rectangle.portrait.fill", category: .chatAndTeam, summary: "Tickets, sprints, and boards in Atlassian Jira"),
+        MCPConnectorItem(id: "telegram", name: "Telegram", iconName: "paperplane.fill", category: .chatAndTeam, summary: "Send alerts and chat updates via Telegram bot"),
+
+        // Design & Media
+        MCPConnectorItem(id: "figma", name: "Figma", iconName: "paintbrush.pointed.fill", category: .designAndMedia, summary: "Inspect Figma frames, tokens, and layout specs", serverURL: "https://mcp.figma.com/sse"),
+        MCPConnectorItem(id: "spotify", name: "Spotify", iconName: "music.note.list", category: .designAndMedia, summary: "Playlists, tracks, and playback controls"),
+        MCPConnectorItem(id: "youtube", name: "YouTube Transcripts", iconName: "play.rectangle.fill", category: .designAndMedia, summary: "Read video captions, chapters, and summaries"),
+        MCPConnectorItem(id: "huggingface", name: "Hugging Face", iconName: "face.smiling.inverse", category: .designAndMedia, summary: "Open models, datasets, and Spaces", serverURL: "https://hf.co/mcp"),
+
+        // Docs & Storage
+        MCPConnectorItem(id: "obsidian", name: "Obsidian Vault", iconName: "note.text", category: .docsAndFiles, summary: "Markdown notes and backlinks"),
+        MCPConnectorItem(id: "notion", name: "Notion", iconName: "book.closed.fill", category: .docsAndFiles, summary: "Pages, databases, and notes in Notion", serverURL: "https://mcp.notion.com/sse"),
+        MCPConnectorItem(id: "dropbox", name: "Dropbox", iconName: "shippingbox.fill", category: .docsAndFiles, summary: "Files and shared folders in Dropbox"),
+        MCPConnectorItem(id: "airtable", name: "Airtable", iconName: "tablecells.badge.ellipsis", category: .docsAndFiles, summary: "Structured bases, records, and views"),
+
+        // Google Workspace (Official remote MCP servers)
+        MCPConnectorItem(id: "google-drive", name: "Google Drive", iconName: "externaldrive.fill", category: .googleWorkspace, summary: "Read and search files in Google Drive", serverURL: "https://drive.mcp.googleapis.com/mcp", requiresWebsiteSetupNote: "Uses Google's remote MCP server with OAuth 2.1."),
+        MCPConnectorItem(id: "google-docs", name: "Google Docs", iconName: "doc.text.fill", category: .googleWorkspace, summary: "Read and write Google Docs", serverURL: "https://docs.mcp.googleapis.com/mcp"),
+        MCPConnectorItem(id: "google-sheets", name: "Google Sheets", iconName: "tablecells.fill", category: .googleWorkspace, summary: "Spreadsheets and tables in Google Sheets", serverURL: "https://sheets.mcp.googleapis.com/mcp"),
+        MCPConnectorItem(id: "google-slides", name: "Google Slides", iconName: "rectangle.on.rectangle.angled", category: .googleWorkspace, summary: "Presentations and slides in Google Slides", serverURL: "https://slides.mcp.googleapis.com/mcp"),
+        MCPConnectorItem(id: "gmail", name: "Gmail", iconName: "envelope.fill", category: .googleWorkspace, summary: "Search and draft emails in Gmail", serverURL: "https://gmail.mcp.googleapis.com/mcp"),
+        MCPConnectorItem(id: "google-calendar", name: "Google Calendar", iconName: "calendar", category: .googleWorkspace, summary: "Check events and schedules in Google Calendar", serverURL: "https://calendar.mcp.googleapis.com/mcp"),
+
+        // Automation & Daily
+        MCPConnectorItem(id: "home-assistant", name: "Home Assistant", iconName: "house.fill", category: .automationAndHome, summary: "Smart home lights, sensors, and automations"),
+        MCPConnectorItem(id: "todoist", name: "Todoist", iconName: "checkmark.circle.fill", category: .automationAndHome, summary: "Personal tasks, due dates, and checklists", serverURL: "https://mcp.todoist.com/sse"),
+        MCPConnectorItem(id: "zapier", name: "Zapier MCP", iconName: "bolt.circle.fill", category: .automationAndHome, summary: "Connect 7,000+ everyday apps through Zapier actions", serverURL: "https://mcp.zapier.com/sse")
     ]
 }
 
@@ -527,6 +877,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var smoothChatTransitionsEnabled: Bool
     public var toolStepAnimationsEnabled: Bool
     public var showMascotOnHome: Bool
+    public var showUnconnectedConnectorsOnHome: Bool
+    public var hiddenConnectorIds: [String]
     public var notificationsEnabled: Bool
     public var workflowChoice: WorkflowTriggerChoice
     public var stopAndAskAtCostEnabled: Bool
@@ -541,6 +893,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
         smoothChatTransitionsEnabled: Bool = true,
         toolStepAnimationsEnabled: Bool = true,
         showMascotOnHome: Bool = true,
+        showUnconnectedConnectorsOnHome: Bool = false,
+        hiddenConnectorIds: [String] = ["google-drive", "google-docs", "notion", "google-sheets", "google-slides"],
         notificationsEnabled: Bool = true,
         workflowChoice: WorkflowTriggerChoice = .bigJobsToo,
         stopAndAskAtCostEnabled: Bool = false,
@@ -554,6 +908,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.smoothChatTransitionsEnabled = smoothChatTransitionsEnabled
         self.toolStepAnimationsEnabled = toolStepAnimationsEnabled
         self.showMascotOnHome = showMascotOnHome
+        self.showUnconnectedConnectorsOnHome = showUnconnectedConnectorsOnHome
+        self.hiddenConnectorIds = hiddenConnectorIds
         self.notificationsEnabled = notificationsEnabled
         self.workflowChoice = workflowChoice
         self.stopAndAskAtCostEnabled = stopAndAskAtCostEnabled
@@ -569,6 +925,7 @@ public struct PersistedWorkspaceBundle: Codable, Equatable, Sendable {
     public var memories: [MemoryItem]
     public var customAgents: [AgentPreset]
     public var customWorkflows: [WorkflowPreset]
+    public var customConnectors: [MCPConnectorItem]
     public var settings: AppSettings
     public var lastSyncedAt: Date
 
@@ -578,6 +935,7 @@ public struct PersistedWorkspaceBundle: Codable, Equatable, Sendable {
         memories: [MemoryItem] = [],
         customAgents: [AgentPreset] = [],
         customWorkflows: [WorkflowPreset] = [],
+        customConnectors: [MCPConnectorItem] = [],
         settings: AppSettings = AppSettings(),
         lastSyncedAt: Date = Date()
     ) {
@@ -586,6 +944,7 @@ public struct PersistedWorkspaceBundle: Codable, Equatable, Sendable {
         self.memories = memories
         self.customAgents = customAgents
         self.customWorkflows = customWorkflows
+        self.customConnectors = customConnectors
         self.settings = settings
         self.lastSyncedAt = lastSyncedAt
     }

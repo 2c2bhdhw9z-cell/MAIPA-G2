@@ -48,11 +48,6 @@ public enum AutoModelRouter {
         return .low
     }
 
-    /// Resolves which model OpenRouter should call given the user's picker choice and current OpenRouter balance.
-    /// Follows Answer 5 & 7a:
-    /// - With $0 on OpenRouter, Auto and free models use only the free AIs (`openrouter/free`).
-    /// - With money on OpenRouter, Auto uses `openrouter/auto` with task-dependent cost tier.
-    /// - If the user picked a specific paid AI himself and the balance runs out ($0), requiresBalancePrompt = true so the chat asks him (switch to free AIs, or stop).
     public static func resolve(
         selectedModelId: String,
         balanceUSD: Double,
@@ -69,7 +64,7 @@ public enum AutoModelRouter {
                 costTier: .low,
                 usesFreePoolOnly: true,
                 requiresBalancePrompt: false,
-                explanation: "Running on iPhone AI ($0)"
+                explanation: "iPhone AI ($0)"
             )
         }
 
@@ -79,7 +74,7 @@ public enum AutoModelRouter {
                 costTier: .low,
                 usesFreePoolOnly: true,
                 requiresBalancePrompt: false,
-                explanation: "Using free OpenRouter AI ($0)"
+                explanation: "Free OpenRouter AI ($0)"
             )
         }
 
@@ -90,7 +85,7 @@ public enum AutoModelRouter {
                     costTier: tier,
                     usesFreePoolOnly: false,
                     requiresBalancePrompt: false,
-                    explanation: "Auto (\(tier.rawValue) tier)"
+                    explanation: "Auto (\(tier.rawValue) task tier)"
                 )
             } else {
                 return ResolvedModelRoute(
@@ -98,19 +93,18 @@ public enum AutoModelRouter {
                     costTier: .low,
                     usesFreePoolOnly: true,
                     requiresBalancePrompt: false,
-                    explanation: "Auto ($0 balance → using free AIs)"
+                    explanation: "Auto ($0 balance → free AIs)"
                 )
             }
         }
 
-        // User explicitly picked a paid model (e.g. Claude Opus 5.5 / Sonnet 5.5)
         if !hasBalance {
             return ResolvedModelRoute(
                 effectiveModelId: selectedModelId,
                 costTier: tier,
                 usesFreePoolOnly: false,
                 requiresBalancePrompt: true,
-                explanation: "Selected paid AI requires OpenRouter balance"
+                explanation: "Paid AI needs OpenRouter balance"
             )
         }
 
@@ -134,7 +128,7 @@ public enum AutoModelRouter {
     }
 }
 
-// MARK: - OpenRouter Service (PKCE OAuth, Balance, Tool-Calling Chat)
+// MARK: - OpenRouter Service (PKCE OAuth, Balance, Web Search, Tool-Calling Chat)
 
 public struct OpenRouterBalanceInfo: Codable, Equatable, Sendable {
     public let remainingUSD: Double
@@ -156,6 +150,8 @@ public struct AgentTurnResult: Sendable {
     public let stepCostUSD: Double
     public let toolCalls: [ToolCallItem]
     public let questions: [NumberedQuestionItem]
+    public let autoSavedMemories: [String]
+    public let generatedSpec: SpecPlanDocument?
     public let pausedForCostLimit: Bool
 
     public init(
@@ -164,6 +160,8 @@ public struct AgentTurnResult: Sendable {
         stepCostUSD: Double,
         toolCalls: [ToolCallItem],
         questions: [NumberedQuestionItem] = [],
+        autoSavedMemories: [String] = [],
+        generatedSpec: SpecPlanDocument? = nil,
         pausedForCostLimit: Bool = false
     ) {
         self.assistantText = assistantText
@@ -171,6 +169,8 @@ public struct AgentTurnResult: Sendable {
         self.stepCostUSD = stepCostUSD
         self.toolCalls = toolCalls
         self.questions = questions
+        self.autoSavedMemories = autoSavedMemories
+        self.generatedSpec = generatedSpec
         self.pausedForCostLimit = pausedForCostLimit
     }
 }
@@ -184,7 +184,6 @@ public final class OpenRouterService: @unchecked Sendable {
         self.githubService = githubService
     }
 
-    /// Exchanges an OpenRouter OAuth PKCE code for an API key (`POST https://openrouter.ai/api/v1/auth/keys`).
     public func exchangePKCECodeForAPIKey(code: String, codeVerifier: String) async throws -> String {
         guard let url = URL(string: "https://openrouter.ai/api/v1/auth/keys") else {
             throw URLError(.badURL)
@@ -210,7 +209,6 @@ public final class OpenRouterService: @unchecked Sendable {
         return key
     }
 
-    /// Checks OpenRouter balance using `/api/v1/credits` and `/api/v1/key`.
     public func fetchBalance(apiKey: String) async throws -> OpenRouterBalanceInfo {
         guard !apiKey.isEmpty, let url = URL(string: "https://openrouter.ai/api/v1/credits") else {
             return OpenRouterBalanceInfo(remainingUSD: 0, totalCreditsUSD: 0, totalUsageUSD: 0)
@@ -237,11 +235,70 @@ public final class OpenRouterService: @unchecked Sendable {
         )
     }
 
-    /// Runs an agent chat turn that can read and search the selected GitHub repository,
-    /// record collapsible tool lines, and ask short numbered questions when needed.
+    // MARK: - Answer 26: Free Web Search & Read a Web Page (no setup required)
+
+    public func searchWebFree(query: String) async -> String {
+        let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
+        guard let url = URL(string: "https://html.duckduckgo.com/html/?q=\(encoded)") else {
+            return "Invalid search query."
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        req.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15", forHTTPHeaderField: "User-Agent")
+        req.timeoutInterval = 10
+
+        guard let (data, _) = try? await session.data(for: req),
+              let html = String(data: data, encoding: .utf8) else {
+            return "Could not reach free web search right now."
+        }
+
+        let stripped = Self.stripHTMLTags(from: html)
+        let lines = stripped
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.count > 35 && !$0.lowercased().hasPrefix("duckduckgo") }
+        return lines.prefix(12).joined(separator: "\n")
+    }
+
+    public func readWebPage(urlString: String) async -> String {
+        guard let url = URL(string: urlString) else { return "Invalid URL: \(urlString)" }
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        req.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)", forHTTPHeaderField: "User-Agent")
+        req.timeoutInterval = 12
+
+        guard let (data, _) = try? await session.data(for: req),
+              let raw = String(data: data, encoding: .utf8) else {
+            return "Could not fetch page at \(urlString)"
+        }
+        let cleaned = Self.stripHTMLTags(from: raw)
+        return String(cleaned.prefix(4000))
+    }
+
+    public static func stripHTMLTags(from html: String) -> String {
+        var result = html
+        // Remove script and style blocks
+        if let scriptRegex = try? NSRegularExpression(pattern: "<(script|style)[^>]*>[\\s\\S]*?</\\1>", options: [.caseInsensitive]) {
+            result = scriptRegex.stringByReplacingMatches(in: result, range: NSRange(result.startIndex..., in: result), withTemplate: " ")
+        }
+        if let tagRegex = try? NSRegularExpression(pattern: "<[^>]+>", options: []) {
+            result = tagRegex.stringByReplacingMatches(in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "\n")
+        }
+        return result
+            .replacingOccurrences(of: "&amp;", with: "&")
+            .replacingOccurrences(of: "&quot;", with: "\"")
+            .replacingOccurrences(of: "&#x27;", with: "'")
+            .replacingOccurrences(of: "&lt;", with: "<")
+            .replacingOccurrences(of: "&gt;", with: ">")
+            .replacingOccurrences(of: "&nbsp;", with: " ")
+    }
+
+    // MARK: - Main Agent Turn Execution
+
     public func runRepoChatTurn(
         thread: ChatThread,
         userPrompt: String,
+        attachments: [ChatAttachmentItem] = [],
         memories: [MemoryItem],
         settings: AppSettings,
         openRouterKey: String?,
@@ -257,7 +314,6 @@ public final class OpenRouterService: @unchecked Sendable {
             isAutonomous: thread.isAutonomous
         )
 
-        // Check if user picked a paid model with $0 balance (Answer 5)
         if route.requiresBalancePrompt {
             let q = NumberedQuestionItem(
                 number: 1,
@@ -276,15 +332,103 @@ public final class OpenRouterService: @unchecked Sendable {
             )
         }
 
-        // Gather live repo context via tools first if a repo is selected
         var recordedTools: [ToolCallItem] = []
         var repoContextSnippet = ""
 
+        // Log active Agent or Workflow steps if selected (Build 4)
+        if let wfId = thread.activeWorkflowId,
+           let wf = (WorkflowPreset.kiroBuiltIns).first(where: { $0.id == wfId }) {
+            for stepName in wf.steps {
+                let wfStep = ToolCallItem(
+                    toolName: "workflow_step",
+                    summaryLine: "\(wf.name): \(stepName)",
+                    inputSummary: stepName,
+                    outputDetail: "Executed agent step '\(stepName)' in workflow '\(wf.name)'.",
+                    status: .completed,
+                    finishedAt: Date()
+                )
+                recordedTools.append(wfStep)
+                onToolStepUpdate?(wfStep)
+            }
+        } else if let agentId = thread.activeAgentId,
+                  let agent = AgentPreset.kiroBuiltIns.first(where: { $0.id == agentId }) {
+            let agStep = ToolCallItem(
+                toolName: "agent_role",
+                summaryLine: "Running agent: \(agent.name)",
+                inputSummary: agent.name,
+                outputDetail: agent.rolePrompt,
+                status: .completed,
+                finishedAt: Date()
+            )
+            recordedTools.append(agStep)
+            onToolStepUpdate?(agStep)
+        }
+
+        // Log any attached files/photos (Build 2)
+        if !attachments.isEmpty {
+            for att in attachments {
+                let attStep = ToolCallItem(
+                    toolName: "attachment",
+                    summaryLine: "Attached \(att.name) (\(att.kind.rawValue))",
+                    inputSummary: att.name,
+                    outputDetail: att.textPreview ?? "Binary attachment (\(att.sizeBytes) bytes)",
+                    status: .completed,
+                    finishedAt: Date()
+                )
+                recordedTools.append(attStep)
+                onToolStepUpdate?(attStep)
+                if let preview = att.textPreview {
+                    repoContextSnippet += "--- Attached File: \(att.name) ---\n\(preview.prefix(2500))\n\n"
+                }
+            }
+        }
+
+        // Check if URL is in prompt -> Read a web page tool (Answer 26)
+        if let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) {
+            let matches = detector.matches(in: userPrompt, options: [], range: NSRange(userPrompt.startIndex..., in: userPrompt))
+            for match in matches.prefix(2) {
+                if let url = match.url {
+                    var pageStep = ToolCallItem(
+                        toolName: "read_web_page",
+                        summaryLine: "Read web page \(url.host ?? url.absoluteString)",
+                        inputSummary: url.absoluteString,
+                        status: .running
+                    )
+                    onToolStepUpdate?(pageStep)
+                    let pageText = await readWebPage(urlString: url.absoluteString)
+                    pageStep.outputDetail = pageText
+                    pageStep.status = .completed
+                    pageStep.finishedAt = Date()
+                    recordedTools.append(pageStep)
+                    onToolStepUpdate?(pageStep)
+                    repoContextSnippet += "--- Web Page (\(url.absoluteString)) ---\n\(pageText.prefix(2000))\n\n"
+                }
+            }
+        }
+
+        // Run free Web Search if webSearchEnabled is turned on (Answer 26)
+        if thread.webSearchEnabled {
+            var webStep = ToolCallItem(
+                toolName: "web_search",
+                summaryLine: "Searched the web for \"\(String(userPrompt.prefix(40)))\"",
+                inputSummary: userPrompt,
+                status: .running
+            )
+            onToolStepUpdate?(webStep)
+            let searchText = await searchWebFree(query: userPrompt)
+            webStep.outputDetail = searchText
+            webStep.status = .completed
+            webStep.finishedAt = Date()
+            recordedTools.append(webStep)
+            onToolStepUpdate?(webStep)
+            repoContextSnippet += "--- Web Search Results ---\n\(searchText)\n\n"
+        }
+
+        // Gather live repo context ONLY when the user has actually selected a repository
         if let repoFullName = thread.repoFullName, !repoFullName.isEmpty {
             let branch = thread.branchName ?? "main"
             let lower = userPrompt.lowercased()
 
-            // Tool 1: List repository files when exploring or reading a repo
             var listStep = ToolCallItem(
                 toolName: "list_files",
                 summaryLine: "Listed files in \(repoFullName) (\(branch))",
@@ -304,7 +448,6 @@ public final class OpenRouterService: @unchecked Sendable {
 
                 repoContextSnippet += "Repository: \(repoFullName) (branch: \(branch))\nFiles (\(paths.count) total):\n" + paths.prefix(60).joined(separator: "\n") + "\n\n"
 
-                // Check if user mentioned a specific file in the repo or if we should read key files (.kiro/notes/PLAN.md, README.md, etc.)
                 let mentionedFiles = paths.filter { path in
                     let fileName = (path as NSString).lastPathComponent.lowercased()
                     return fileName.count > 2 && lower.contains(fileName)
@@ -345,7 +488,6 @@ public final class OpenRouterService: @unchecked Sendable {
                     }
                 }
 
-                // If user asks to search or find something specific, run search_repo
                 if lower.contains("search") || lower.contains("find") || lower.contains("where") {
                     let words = userPrompt
                         .components(separatedBy: CharacterSet.alphanumerics.inverted)
@@ -382,10 +524,15 @@ public final class OpenRouterService: @unchecked Sendable {
             }
         }
 
-        // If OpenRouter API key is present and model is not apple/foundation, call OpenRouter Chat Completions API
+        // Generate Spec document if Build with spec is active (Build 5)
+        let generatedSpec: SpecPlanDocument? = thread.specModeEnabled
+            ? Self.buildSpecDocument(for: userPrompt, existing: thread.specDocument)
+            : nil
+
+        // Call OpenRouter Chat Completions API if key is present
         if let apiKey = openRouterKey, !apiKey.isEmpty, route.effectiveModelId != "apple/foundation" {
             do {
-                let (replyText, actualModel, costUSD) = try await callOpenRouterCompletions(
+                let (rawReplyText, actualModel, costUSD) = try await callOpenRouterCompletions(
                     apiKey: apiKey,
                     route: route,
                     thread: thread,
@@ -393,13 +540,14 @@ public final class OpenRouterService: @unchecked Sendable {
                     repoContext: repoContextSnippet,
                     memories: settings.memoriesMasterSwitch ? memories.filter(\.isEnabled) : []
                 )
+                let (cleanReply, savedMems) = Self.extractAutoMemories(from: rawReplyText)
                 let newTotal = thread.totalCostUSD + costUSD
                 let paused = AutoModelRouter.shouldStopAndAskForCost(
                     currentJobCostUSD: newTotal,
                     stopSwitchEnabled: settings.stopAndAskAtCostEnabled,
                     thresholdUSD: settings.stopAndAskCostThresholdUSD
                 )
-                var questions = Self.extractNumberedQuestions(from: replyText)
+                var questions = Self.extractNumberedQuestions(from: cleanReply)
                 if paused {
                     questions.append(
                         NumberedQuestionItem(
@@ -410,19 +558,20 @@ public final class OpenRouterService: @unchecked Sendable {
                     )
                 }
                 return AgentTurnResult(
-                    assistantText: replyText,
+                    assistantText: cleanReply,
                     modelUsed: actualModel,
                     stepCostUSD: costUSD,
                     toolCalls: recordedTools,
                     questions: questions,
+                    autoSavedMemories: savedMems,
+                    generatedSpec: generatedSpec,
                     pausedForCostLimit: paused
                 )
             } catch {
-                // Fall through to local synthesis with the error noted cleanly
+                // Fall through to local synthesis
             }
         }
 
-        // Local / On-Device response using the live repo context fetched above ($0.00 cost)
         let fallbackReply = buildOnDeviceRepoReply(
             userPrompt: userPrompt,
             thread: thread,
@@ -433,10 +582,12 @@ public final class OpenRouterService: @unchecked Sendable {
         let questions = Self.extractNumberedQuestions(from: fallbackReply)
         return AgentTurnResult(
             assistantText: fallbackReply,
-            modelUsed: (openRouterKey ?? "").isEmpty ? "apple/foundation (Free)" : route.effectiveModelId,
+            modelUsed: (openRouterKey ?? "").isEmpty ? "iPhone AI ($0)" : route.effectiveModelId,
             stepCostUSD: 0.0,
             toolCalls: recordedTools,
-            questions: questions
+            questions: questions,
+            autoSavedMemories: [],
+            generatedSpec: generatedSpec
         )
     }
 
@@ -459,16 +610,21 @@ public final class OpenRouterService: @unchecked Sendable {
         req.setValue("MAIPA-G", forHTTPHeaderField: "X-Title")
 
         var systemText = """
-        You are MAIPA-G, a native iPhone AI assistant with GitHub built in.
+        You are MAIPA-G, a native iPhone AI assistant for apps, games, and everyday work.
         Use plain English. Keep answers short, clear, and casual. Never assume.
         When you need choices from the user, ask short numbered questions like:
         1. Question text? [Option A | Option B]
+        When the user tells you a lasting preference to remember for future chats, include `[MEMORY: short note]` on its own line so MAIPA-G saves it automatically.
         """
+        if let agentId = thread.activeAgentId,
+           let agent = AgentPreset.kiroBuiltIns.first(where: { $0.id == agentId }) {
+            systemText += "\n\nActive Agent Role (\(agent.name)): \(agent.rolePrompt)"
+        }
         if !memories.isEmpty {
             systemText += "\n\nActive Memories:\n" + memories.map { "- \($0.text)" }.joined(separator: "\n")
         }
         if !repoContext.isEmpty {
-            systemText += "\n\nLive GitHub Repository Data:\n" + repoContext
+            systemText += "\n\nContext Data:\n" + repoContext
         }
 
         var apiMessages: [[String: Any]] = [
@@ -482,8 +638,14 @@ public final class OpenRouterService: @unchecked Sendable {
         }
         apiMessages.append(["role": "user", "content": userPrompt])
 
+        // If paid web search is allowed (Answer 26 & 7a), enable OpenRouter web search plugin
+        var modelToCall = route.effectiveModelId
+        if thread.webSearchEnabled && !route.usesFreePoolOnly && !modelToCall.hasSuffix(":online") {
+            modelToCall += ":online"
+        }
+
         var payload: [String: Any] = [
-            "model": route.effectiveModelId,
+            "model": modelToCall,
             "messages": apiMessages
         ]
         if let modelInfo = AIModelOption.defaultCatalog.first(where: { $0.id == thread.selectedModelId }),
@@ -525,35 +687,89 @@ public final class OpenRouterService: @unchecked Sendable {
         repoContext: String,
         hasOpenRouterKey: Bool
     ) -> String {
-        let repoLabel = thread.repoFullName ?? "no repo picked"
-        let branchLabel = thread.branchName ?? "main"
-
-        if recordedTools.isEmpty {
-            return """
-            I'm ready. Right now **\(repoLabel)** (\(branchLabel)) is selected.
-
-            \(hasOpenRouterKey ? "OpenRouter is connected." : "Tip: Tap **Sign in with OpenRouter** at the top or in Settings to use cloud AIs, or keep chatting free at $0.00.")
-            """
+        if let repoFullName = thread.repoFullName, !repoFullName.isEmpty {
+            let branchLabel = thread.branchName ?? "main"
+            var lines: [String] = []
+            lines.append("Checked **\(repoFullName)** on branch **\(branchLabel)**:")
+            for tool in recordedTools {
+                lines.append("- \(tool.summaryLine)")
+            }
+            if let readTool = recordedTools.first(where: { $0.toolName == "read_file" && $0.status == .completed }) {
+                let previewLines = readTool.outputDetail
+                    .components(separatedBy: .newlines)
+                    .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+                    .prefix(8)
+                    .joined(separator: "\n")
+                lines.append("\nFrom `\(readTool.inputSummary)`:\n```\n\(previewLines)\n```")
+            }
+            if let searchTool = recordedTools.first(where: { $0.toolName == "search_repo" && $0.status == .completed }) {
+                lines.append("\nSearch results:\n```\n\(searchTool.outputDetail.prefix(600))\n```")
+            }
+            lines.append("\nTap any step above to expand its full output, or tap the **Files** button at the top right to view and edit files in \(repoFullName).")
+            return lines.joined(separator: "\n")
         }
 
+        // No repository selected (clean everyday/chat state)
         var lines: [String] = []
-        lines.append("Checked **\(repoLabel)** on branch **\(branchLabel)**:")
-        for tool in recordedTools {
-            lines.append("- \(tool.summaryLine)")
+        if !recordedTools.isEmpty {
+            for tool in recordedTools {
+                lines.append("- \(tool.summaryLine)")
+            }
+            if let webTool = recordedTools.first(where: { ($0.toolName == "web_search" || $0.toolName == "read_web_page") && $0.status == .completed }) {
+                lines.append("\nWeb summary:\n\(webTool.outputDetail.prefix(700))")
+            }
+        } else {
+            lines.append("Got it: **\"\(userPrompt)\"**")
+            lines.append("\nYou're currently chatting with **no repository connected**.")
+            lines.append("- To work on a project, tap **Pick a repo…** below the message box.")
+            if !hasOpenRouterKey {
+                lines.append("- To use cloud AIs (free or paid), tap **Sign in with OpenRouter**.")
+            }
         }
-        if let readTool = recordedTools.first(where: { $0.toolName == "read_file" && $0.status == .completed }) {
-            let previewLines = readTool.outputDetail
-                .components(separatedBy: .newlines)
-                .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
-                .prefix(8)
-                .joined(separator: "\n")
-            lines.append("\nFrom `\(readTool.inputSummary)`:\n```\n\(previewLines)\n```")
-        }
-        if let searchTool = recordedTools.first(where: { $0.toolName == "search_repo" && $0.status == .completed }) {
-            lines.append("\nSearch results:\n```\n\(searchTool.outputDetail.prefix(600))\n```")
-        }
-        lines.append("\nTap any step above to open the full output, or tap the **Files** button at the top right to browse every file in \(repoLabel).")
         return lines.joined(separator: "\n")
+    }
+
+    public static func buildSpecDocument(for prompt: String, existing: SpecPlanDocument?) -> SpecPlanDocument {
+        if let existing = existing {
+            return existing
+        }
+        let words = prompt
+            .lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { $0.count > 2 }
+            .prefix(3)
+        let slug = words.isEmpty ? "feature-spec" : words.joined(separator: "-")
+        let shortTitle = String(prompt.prefix(44))
+        return SpecPlanDocument(
+            slug: slug,
+            title: shortTitle,
+            whatItWillBuild: "Build and verify: \(prompt)\n\n- Plain-English goal agreed before writing code.\n- Stored in `.kiro/specs/\(slug)/` so Kiro and MAIPA-G can both read it.",
+            howItWorks: "1. Update the relevant Swift / repo files cleanly.\n2. Run checks and verify there are no errors.\n3. Save to a clean side branch and open a pull request (or save straight to the branch if configured).",
+            tasks: [
+                SpecTaskItem(number: 1, title: "Confirm requirements and edge cases"),
+                SpecTaskItem(number: 2, title: "Implement the code changes in the repository"),
+                SpecTaskItem(number: 3, title: "Run build and check the result")
+            ]
+        )
+    }
+
+    public static func extractAutoMemories(from text: String) -> (cleanedText: String, memories: [String]) {
+        var memories: [String] = []
+        var keptLines: [String] = []
+        for line in text.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.uppercased().hasPrefix("[MEMORY:"), trimmed.hasSuffix("]") {
+                let start = trimmed.index(trimmed.startIndex, offsetBy: 8)
+                let end = trimmed.index(before: trimmed.endIndex)
+                let note = String(trimmed[start..<end]).trimmingCharacters(in: .whitespaces)
+                if !note.isEmpty {
+                    memories.append(note)
+                }
+            } else {
+                keptLines.append(line)
+            }
+        }
+        return (keptLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines), memories)
     }
 
     public static func extractNumberedQuestions(from text: String) -> [NumberedQuestionItem] {
@@ -569,7 +785,6 @@ public final class OpenRouterService: @unchecked Sendable {
             let afterDot = trimmed[trimmed.index(after: dotIndex)...].trimmingCharacters(in: .whitespaces)
             guard afterDot.contains("?") else { continue }
 
-            // Check for bracketed options: Question? [Option 1 | Option 2]
             if let openBracket = afterDot.firstIndex(of: "["),
                let closeBracket = afterDot.lastIndex(of: "]"),
                openBracket < closeBracket {

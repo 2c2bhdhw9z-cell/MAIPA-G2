@@ -144,13 +144,13 @@ public final class GitHubService: @unchecked Sendable {
         return login
     }
 
-    public func fetchRepositories(token: String?, fallbackOwner: String = "2c2bhdhw9z-cell") async throws -> [GitHubRepo] {
-        let path: String
-        if let token = token, !token.isEmpty {
-            path = "/user/repos?sort=updated&per_page=100&affiliation=owner,collaborator"
-        } else {
-            path = "/users/\(fallbackOwner)/repos?sort=updated&per_page=100"
+    /// Only fetches repositories when a valid GitHub token is connected.
+    /// Does NOT auto-connect or pull fallback repositories when signed out.
+    public func fetchRepositories(token: String?) async throws -> [GitHubRepo] {
+        guard let token = token, !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return []
         }
+        let path = "/user/repos?sort=updated&per_page=100&affiliation=owner,collaborator"
         let data = try await githubGET(path: path, token: token)
         guard let arr = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
             throw GitHubServiceError.decodingError("Expected array of repos")
@@ -178,6 +178,34 @@ public final class GitHubService: @unchecked Sendable {
                 updatedAt: updatedAt
             )
         }
+    }
+
+    public func createRepository(name: String, description: String, isPrivate: Bool, token: String) async throws -> GitHubRepo {
+        let body: [String: Any] = [
+            "name": name,
+            "description": description,
+            "private": isPrivate,
+            "auto_init": true
+        ]
+        let data = try await githubRequest(method: "POST", path: "/user/repos", token: token, bodyJSON: body)
+        guard let item = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let id = item["id"] as? Int,
+              let repoName = item["name"] as? String,
+              let fullName = item["full_name"] as? String,
+              let owner = item["owner"] as? [String: Any],
+              let login = owner["login"] as? String else {
+            throw GitHubServiceError.decodingError("Could not parse created repo")
+        }
+        let defaultBranch = (item["default_branch"] as? String) ?? "main"
+        return GitHubRepo(
+            id: id,
+            name: repoName,
+            fullName: fullName,
+            ownerLogin: login,
+            defaultBranch: defaultBranch,
+            isPrivate: isPrivate,
+            description: description
+        )
     }
 
     public func fetchBranches(fullName: String, token: String?) async throws -> [GitHubBranch] {
@@ -234,7 +262,6 @@ public final class GitHubService: @unchecked Sendable {
         let tree = try await fetchTree(fullName: fullName, branch: branch, token: token)
         let lowerQuery = query.lowercased()
 
-        // First match filenames and text files up to a reasonable count so it works even on unindexed branches
         var results: [(path: String, line: Int, snippet: String)] = []
         let candidateFiles = tree.filter { item in
             guard item.type == "blob", (item.size ?? 0) < 120_000 else { return false }
@@ -243,7 +270,6 @@ public final class GitHubService: @unchecked Sendable {
             return textExts.contains(ext) || item.path.lowercased().contains(lowerQuery)
         }
 
-        // Prioritize files whose path matches or important project files
         let sortedCandidates = candidateFiles.sorted { a, b in
             let aMatch = a.path.lowercased().contains(lowerQuery)
             let bMatch = b.path.lowercased().contains(lowerQuery)
@@ -271,13 +297,314 @@ public final class GitHubService: @unchecked Sendable {
         return results
     }
 
+    // MARK: - Build 2: Saving Code Changes (Side Branch + PR or Straight-to-Branch) & Undo (Answer 9)
+
+    /// Checks whether a repo's own rules say "no branches" (like Continuum) or if the user turned on straight-to-branch saving.
+    public func shouldSaveStraightToBranch(fullName: String, pickedBranch: String, defaultBranch: String, settings: AppSettings) -> Bool {
+        if fullName.lowercased().contains("continuum") {
+            return true
+        }
+        if settings.perRepoSaveStraightToBranch[fullName] == true {
+            return true
+        }
+        // If user explicitly picked a non-default branch, work on that branch directly (Answer 9)
+        if pickedBranch != defaultBranch {
+            return true
+        }
+        return false
+    }
+
+    /// Commits file changes to GitHub under MAIPA-G's name (Answer 9 & line 43).
+    /// - If `pickedBranch == defaultBranch` and straight-save is off, creates a new side branch (`maipa-g/<slug>`) and opens a Pull Request into `defaultBranch`.
+    /// - Otherwise saves directly onto `pickedBranch`.
+    public func saveChangesToRepo(
+        fullName: String,
+        pickedBranch: String,
+        defaultBranch: String,
+        commitMessage: String,
+        operations: [RepoFileEditOperation],
+        settings: AppSettings,
+        token: String
+    ) async throws -> SavedChangeReceipt {
+        guard !token.isEmpty else { throw GitHubServiceError.notConnected }
+
+        // 1. Get the current HEAD SHA of pickedBranch
+        let refData = try await githubGET(path: "/repos/\(fullName)/git/ref/heads/\(pickedBranch)", token: token)
+        guard let refJSON = try JSONSerialization.jsonObject(with: refData) as? [String: Any],
+              let obj = refJSON["object"] as? [String: Any],
+              let baseCommitSha = obj["sha"] as? String else {
+            throw GitHubServiceError.decodingError("Could not read branch HEAD SHA")
+        }
+
+        // 2. Get base commit's tree SHA
+        let commitData = try await githubGET(path: "/repos/\(fullName)/git/commits/\(baseCommitSha)", token: token)
+        guard let commitJSON = try JSONSerialization.jsonObject(with: commitData) as? [String: Any],
+              let treeObj = commitJSON["tree"] as? [String: Any],
+              let baseTreeSha = treeObj["sha"] as? String else {
+            throw GitHubServiceError.decodingError("Could not read base tree SHA")
+        }
+
+        // 3. Determine target branch (side branch vs straight-to-branch)
+        let saveDirect = shouldSaveStraightToBranch(
+            fullName: fullName,
+            pickedBranch: pickedBranch,
+            defaultBranch: defaultBranch,
+            settings: settings
+        )
+        let shortId = String(UUID().uuidString.lowercased().prefix(6))
+        let workingBranch = saveDirect ? pickedBranch : "maipa-g/update-\(shortId)"
+
+        if !saveDirect {
+            let createRefBody: [String: Any] = [
+                "ref": "refs/heads/\(workingBranch)",
+                "sha": baseCommitSha
+            ]
+            _ = try await githubRequest(method: "POST", path: "/repos/\(fullName)/git/refs", token: token, bodyJSON: createRefBody)
+        }
+
+        // 4. Build tree entries for all operations
+        var treeEntries: [[String: Any]] = []
+        for op in operations {
+            let cleanPath = op.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            switch op.kind {
+            case .create, .update:
+                let content = op.content ?? ""
+                let blobBody: [String: Any] = [
+                    "content": content,
+                    "encoding": "utf-8"
+                ]
+                let blobData = try await githubRequest(method: "POST", path: "/repos/\(fullName)/git/blobs", token: token, bodyJSON: blobBody)
+                guard let blobJSON = try JSONSerialization.jsonObject(with: blobData) as? [String: Any],
+                      let blobSha = blobJSON["sha"] as? String else {
+                    throw GitHubServiceError.decodingError("Could not create blob for \(cleanPath)")
+                }
+                let isShellScript = cleanPath.hasSuffix(".sh")
+                treeEntries.append([
+                    "path": cleanPath,
+                    "mode": isShellScript ? "100755" : "100644",
+                    "type": "blob",
+                    "sha": blobSha
+                ])
+            case .delete:
+                treeEntries.append([
+                    "path": cleanPath,
+                    "mode": "100644",
+                    "type": "blob",
+                    "sha": NSNull()
+                ])
+            }
+        }
+
+        // 5. Create new Git Tree
+        let newTreeBody: [String: Any] = [
+            "base_tree": baseTreeSha,
+            "tree": treeEntries
+        ]
+        let newTreeData = try await githubRequest(method: "POST", path: "/repos/\(fullName)/git/trees", token: token, bodyJSON: newTreeBody)
+        guard let newTreeJSON = try JSONSerialization.jsonObject(with: newTreeData) as? [String: Any],
+              let newTreeSha = newTreeJSON["sha"] as? String else {
+            throw GitHubServiceError.decodingError("Could not create Git tree")
+        }
+
+        // 6. Create Git Commit signed under MAIPA-G's name (line 43 of PLAN.md)
+        let newCommitBody: [String: Any] = [
+            "message": commitMessage,
+            "tree": newTreeSha,
+            "parents": [baseCommitSha],
+            "author": [
+                "name": "MAIPA-G",
+                "email": "maipa-g@users.noreply.github.com"
+            ],
+            "committer": [
+                "name": "MAIPA-G",
+                "email": "maipa-g@users.noreply.github.com"
+            ]
+        ]
+        let newCommitData = try await githubRequest(method: "POST", path: "/repos/\(fullName)/git/commits", token: token, bodyJSON: newCommitBody)
+        guard let newCommitJSON = try JSONSerialization.jsonObject(with: newCommitData) as? [String: Any],
+              let newCommitSha = newCommitJSON["sha"] as? String else {
+            throw GitHubServiceError.decodingError("Could not create Git commit")
+        }
+
+        // 7. Update workingBranch ref to point to newCommitSha
+        let updateRefBody: [String: Any] = [
+            "sha": newCommitSha,
+            "force": false
+        ]
+        _ = try await githubRequest(method: "PATCH", path: "/repos/\(fullName)/git/refs/heads/\(workingBranch)", token: token, bodyJSON: updateRefBody)
+
+        // 8. If working on a side branch, open a Pull Request into defaultBranch
+        var prNumber: Int? = nil
+        var prURL: String? = nil
+        if !saveDirect {
+            let prBody: [String: Any] = [
+                "title": commitMessage,
+                "head": workingBranch,
+                "base": defaultBranch,
+                "body": "Saved by **MAIPA-G**.\n\nChanged files:\n" + operations.map { "- `\($0.path)` (\($0.kind.rawValue))" }.joined(separator: "\n")
+            ]
+            let prData = try await githubRequest(method: "POST", path: "/repos/\(fullName)/pulls", token: token, bodyJSON: prBody)
+            if let prJSON = try JSONSerialization.jsonObject(with: prData) as? [String: Any] {
+                prNumber = prJSON["number"] as? Int
+                prURL = prJSON["html_url"] as? String
+            }
+        }
+
+        return SavedChangeReceipt(
+            repoFullName: fullName,
+            baseBranch: defaultBranch,
+            workingBranch: workingBranch,
+            commitSha: newCommitSha,
+            previousCommitSha: baseCommitSha,
+            commitMessage: commitMessage,
+            changedPaths: operations.map(\.path),
+            prNumber: prNumber,
+            prURL: prURL,
+            state: saveDirect ? .savedDirect : .pendingPR
+        )
+    }
+
+    /// Answer 9: "Add it" button — squash-merges the PR into the base branch, then deletes the side branch.
+    public func mergeAndTidyPullRequest(receipt: SavedChangeReceipt, token: String) async throws {
+        guard let prNum = receipt.prNumber else { return }
+        let mergeBody: [String: Any] = [
+            "commit_title": receipt.commitMessage,
+            "merge_method": "squash"
+        ]
+        _ = try await githubRequest(method: "PUT", path: "/repos/\(receipt.repoFullName)/pulls/\(prNum)/merge", token: token, bodyJSON: mergeBody)
+        if receipt.workingBranch != receipt.baseBranch {
+            _ = try? await githubRequest(method: "DELETE", path: "/repos/\(receipt.repoFullName)/git/refs/heads/\(receipt.workingBranch)", token: token, bodyJSON: nil)
+        }
+    }
+
+    /// Answer 9: "Throw away" button — closes the PR without merging and deletes the side branch.
+    public func closeAndTidyPullRequest(receipt: SavedChangeReceipt, token: String) async throws {
+        if let prNum = receipt.prNumber {
+            let closeBody: [String: Any] = ["state": "closed"]
+            _ = try? await githubRequest(method: "PATCH", path: "/repos/\(receipt.repoFullName)/pulls/\(prNum)", token: token, bodyJSON: closeBody)
+        }
+        if receipt.workingBranch != receipt.baseBranch {
+            _ = try? await githubRequest(method: "DELETE", path: "/repos/\(receipt.repoFullName)/git/refs/heads/\(receipt.workingBranch)", token: token, bodyJSON: nil)
+        }
+    }
+
+    /// Answer 9: "Undo" button — one tap takes back the last change an agent saved.
+    public func undoLastSavedChange(receipt: SavedChangeReceipt, token: String) async throws {
+        if receipt.state == .pendingPR {
+            try await closeAndTidyPullRequest(receipt: receipt, token: token)
+            return
+        }
+        // Reset the branch ref back to previousCommitSha
+        let resetBody: [String: Any] = [
+            "sha": receipt.previousCommitSha,
+            "force": true
+        ]
+        _ = try await githubRequest(
+            method: "PATCH",
+            path: "/repos/\(receipt.repoFullName)/git/refs/heads/\(receipt.workingBranch)",
+            token: token,
+            bodyJSON: resetBody
+        )
+    }
+
+    // MARK: - Build 3: GitHub Actions Runs, Build Checking, and Autonomous Jobs
+
+    public func fetchWorkflowRuns(fullName: String, token: String?) async throws -> [GitHubWorkflowRunItem] {
+        let data = try await githubGET(path: "/repos/\(fullName)/actions/runs?per_page=15", token: token)
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let runs = json["workflow_runs"] as? [[String: Any]] else {
+            return []
+        }
+        return runs.compactMap { item in
+            guard let id = item["id"] as? Int,
+                  let name = item["name"] as? String,
+                  let headBranch = item["head_branch"] as? String,
+                  let headSha = item["head_sha"] as? String,
+                  let status = item["status"] as? String,
+                  let htmlURL = item["html_url"] as? String else {
+                return nil
+            }
+            let runNumber = (item["run_number"] as? Int) ?? 0
+            let conclusion = item["conclusion"] as? String
+            let createdAt = (item["created_at"] as? String) ?? ""
+            return GitHubWorkflowRunItem(
+                id: id,
+                runNumber: runNumber,
+                name: name,
+                headBranch: headBranch,
+                headSha: headSha,
+                status: status,
+                conclusion: conclusion,
+                htmlURL: htmlURL,
+                createdAt: createdAt
+            )
+        }
+    }
+
+    public func triggerWorkflowDispatch(fullName: String, workflowFileName: String = "ios.yml", ref: String = "main", token: String) async throws {
+        let body: [String: Any] = ["ref": ref]
+        _ = try await githubRequest(
+            method: "POST",
+            path: "/repos/\(fullName)/actions/workflows/\(workflowFileName)/dispatches",
+            token: token,
+            bodyJSON: body
+        )
+    }
+
+    // MARK: - Build 5: Official MCP Registry Live Search (40,000+ Connectors — Answer 28)
+
+    public func searchOfficialMCPRegistry(query: String) async throws -> [MCPConnectorItem] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let encoded = trimmed.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        let urlString = trimmed.isEmpty
+            ? "https://registry.modelcontextprotocol.io/v0/servers?limit=30"
+            : "https://registry.modelcontextprotocol.io/v0/servers?search=\(encoded)&limit=30"
+        guard let url = URL(string: urlString) else { return [] }
+
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        req.timeoutInterval = 10
+
+        let (data, resp) = try await session.data(for: req)
+        let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        guard (200..<300).contains(status),
+              let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return []
+        }
+
+        let rawServers = (json["servers"] as? [[String: Any]]) ?? []
+        return rawServers.compactMap { entry -> MCPConnectorItem? in
+            let serverObj = (entry["server"] as? [String: Any]) ?? entry
+            guard let rawName = (serverObj["name"] as? String) ?? (serverObj["id"] as? String) else {
+                return nil
+            }
+            let desc = (serverObj["description"] as? String) ?? "Official MCP Registry server"
+            var remoteURL: String? = nil
+            if let remotes = serverObj["remotes"] as? [[String: Any]],
+               let firstRemote = remotes.first {
+                remoteURL = firstRemote["url"] as? String
+            }
+            let shortTitle = rawName.split(separator: "/").last.map(String.init) ?? rawName
+            return MCPConnectorItem(
+                id: "registry-\(rawName.lowercased())",
+                name: shortTitle,
+                iconName: "puzzlepiece.extension.fill",
+                category: .officialRegistry,
+                summary: desc,
+                serverURL: remoteURL,
+                isPopular: false,
+                isConnected: false
+            )
+        }
+    }
+
     // MARK: - Private MAIPA-G-data Sync (Answer 16)
 
     public func syncWorkspaceToPrivateRepo(bundle: PersistedWorkspaceBundle, owner: String, token: String) async throws {
         guard !token.isEmpty else { return }
         let fullName = "\(owner)/\(Self.privateDataRepoName)"
 
-        // Ensure private repo exists
         do {
             _ = try await githubGET(path: "/repos/\(fullName)", token: token)
         } catch {
