@@ -1,0 +1,179 @@
+name: iOS
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    paths:
+      - "native/**"
+      - "Packages/**"
+      - "docs/**"
+      - ".github/workflows/ios.yml"
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tool versions
+        run: |
+          swift --version
+          python3 --version
+
+      - name: Run AgentCore Swift package tests and CLI self-test
+        working-directory: Packages/AgentCore
+        run: |
+          swift test
+          swift run maipa-g-runner --self-test
+
+      - name: Verify iOS packaging files and OAuth callback pages
+        run: |
+          [ -f native/ios/project.yml ] || { echo "::error::native/ios/project.yml missing"; exit 1; }
+          [ -f native/ios/package-ipa.sh ] || { echo "::error::native/ios/package-ipa.sh missing"; exit 1; }
+          [ -f docs/index.html ] || { echo "::error::docs/index.html missing"; exit 1; }
+          [ -f docs/callback.html ] || { echo "::error::docs/callback.html missing"; exit 1; }
+          [ -f docs/client-metadata.json ] || { echo "::error::docs/client-metadata.json missing"; exit 1; }
+          bash -n native/ios/package-ipa.sh
+
+  ipa:
+    needs: checks
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Runner and toolchain versions
+        run: |
+          sw_vers
+          xcode-select -p
+          xcodebuild -version
+          xcodebuild -showsdks | sed -n '/iOS/,/^$/p' || true
+
+      - name: Install XcodeGen
+        run: |
+          command -v xcodegen >/dev/null 2>&1 || brew install xcodegen
+          xcodegen --version
+
+      - name: Package the unsigned .ipa
+        env:
+          MAIPAG_BUILD_NUMBER: ${{ github.run_number }}
+        run: |
+          chmod +x native/ios/package-ipa.sh
+          ./native/ios/package-ipa.sh
+
+      - name: Verify the .ipa (version, executable, Info.plist)
+        run: |
+          IPA=native/ios/build/MAIPA-G.ipa
+          [ -f "$IPA" ] || { echo "::error::no .ipa was produced"; exit 1; }
+          SIZE=$(stat -f%z "$IPA")
+          echo "size: $SIZE bytes"
+          [ "$SIZE" -gt 50000 ] || { echo "::error::.ipa is implausibly small ($SIZE bytes)"; exit 1; }
+          unzip -l "$IPA" | grep -q "Payload/MAIPA-G.app/MAIPA-G" \
+            || { echo "::error::no executable at Payload/MAIPA-G.app/MAIPA-G"; exit 1; }
+          unzip -l "$IPA" | grep -q "Payload/MAIPA-G.app/Info.plist" \
+            || { echo "::error::no Info.plist in the bundle"; exit 1; }
+          APP_VER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' native/ios/build/stage/Payload/MAIPA-G.app/Info.plist)"
+          echo "verified CFBundleVersion: $APP_VER"
+          [ "$APP_VER" = "${{ github.run_number }}" ] \
+            || { echo "::error::CFBundleVersion ($APP_VER) does not match run_number (${{ github.run_number }})"; exit 1; }
+
+      - name: Upload .ipa artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MAIPA-G-ipa-${{ github.run_number }}
+          path: native/ios/build/MAIPA-G.ipa
+          retention-days: 14
+
+      - name: Publish GitHub Release
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="build-${{ github.run_number }}-$(echo '${{ github.sha }}' | cut -c1-7)"
+          LATEST="https://github.com/${{ github.repository }}/releases/latest/download/MAIPA-G.ipa"
+
+          cat > /tmp/notes.md <<'EOF'
+          **MAIPA-G**, an iPhone app for AI agents and workflows with GitHub built in.
+
+          Grab `MAIPA-G-<number>.ipa` below (both .ipa files are the same app; the numbered one tells you which build it is) and sign it with your sideloading app and certificate.
+
+          Always the newest build:
+          EOF
+          echo "$LATEST" >> /tmp/notes.md
+          printf '\nBuilt from %s on %s.\n' "${{ github.sha }}" "${{ github.ref_name }}" >> /tmp/notes.md
+
+          cp native/ios/build/MAIPA-G.ipa "native/ios/build/MAIPA-G-${{ github.run_number }}.ipa"
+
+          publish() {
+            gh release create "$TAG" \
+              native/ios/build/MAIPA-G.ipa \
+              "native/ios/build/MAIPA-G-${{ github.run_number }}.ipa" \
+              native/ios/get-task-allow.entitlements \
+              native/ios/get-task-allow.plist \
+              --target "${{ github.sha }}" \
+              --title "MAIPA-G build ${{ github.run_number }}" \
+              --notes-file /tmp/notes.md
+          }
+          upload_into_existing() {
+            gh release upload "$TAG" \
+              native/ios/build/MAIPA-G.ipa \
+              "native/ios/build/MAIPA-G-${{ github.run_number }}.ipa" \
+              native/ios/get-task-allow.entitlements \
+              native/ios/get-task-allow.plist \
+              --clobber
+          }
+          publish_existing() {
+            gh release edit "$TAG" --draft=false --target "${{ github.sha }}"
+          }
+
+          published=0
+          for attempt in 1 2 3 4 5; do
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              if upload_into_existing && publish_existing; then published=1; break; fi
+            elif publish; then
+              published=1; break
+            fi
+            if [ "$attempt" -lt 5 ]; then
+              sleep=$((attempt * 15))
+              sleep "$sleep"
+            fi
+          done
+
+          if [ "$published" -ne 1 ]; then
+            echo "::error::could not publish $TAG after 5 attempts."
+            exit 1
+          fi
+          echo "released $TAG with MAIPA-G.ipa"
+
+      - name: Say how to install it
+        if: success() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        run: |
+          set -euo pipefail
+          REPO="https://github.com/${{ github.repository }}"
+          LATEST="$REPO/releases/latest/download/MAIPA-G.ipa"
+          {
+            echo "## Install this build"
+            echo
+            echo "**[Download MAIPA-G.ipa]($LATEST)** — this link always gives the newest build."
+            echo
+            echo "Then import it into ESign, Feather, SideStore, or AltStore and sign it with your certificate."
+            echo
+            echo "- ESign: \`esign://install?url=$LATEST\`"
+            echo "- Feather: \`feather://install?url=$LATEST\`"
+            echo
+            echo "Built from \`${{ github.sha }}\`."
+          } >> "$GITHUB_STEP_SUMMARY"
