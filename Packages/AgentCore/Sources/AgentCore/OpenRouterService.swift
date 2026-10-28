@@ -894,6 +894,7 @@ public final class OpenRouterService: @unchecked Sendable {
         }
 
         // 2. Parse [DELETE_FILE: path]
+        var deleteOps: [RepoFileEditOperation] = []
         if let deleteRegex = try? NSRegularExpression(pattern: "\\[DELETE_FILE:\\s*([^\\]]+)\\]", options: [.caseInsensitive]) {
             let matches = deleteRegex.matches(in: working, options: [], range: NSRange(working.startIndex..., in: working))
             for match in matches.reversed() {
@@ -901,12 +902,13 @@ public final class OpenRouterService: @unchecked Sendable {
                    let fullRange = Range(match.range(at: 0), in: working) {
                     let path = String(working[pathRange]).trimmingCharacters(in: .whitespacesAndNewlines)
                     if !path.isEmpty {
-                        operations.insert(RepoFileEditOperation(path: path, kind: .delete, content: ""), at: 0)
+                        deleteOps.insert(RepoFileEditOperation(path: path, kind: .delete, content: ""), at: 0)
                     }
                     working.replaceSubrange(fullRange, with: "\nRequested deletion of `\(path)`.")
                 }
             }
         }
+        operations.append(contentsOf: deleteOps)
 
         return (working.trimmingCharacters(in: .whitespacesAndNewlines), operations)
     }
