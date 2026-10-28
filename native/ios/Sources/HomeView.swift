@@ -1,9 +1,13 @@
 import SwiftUI
+import PhotosUI
+import UniformTypeIdentifiers
 import AgentCore
 
 public struct HomeView: View {
     @ObservedObject public var state: AppState
     @State private var expandedToolIds: Set<String> = []
+    @State private var selectedPhotoItem: PhotosPickerItem? = nil
+    @State private var isFileImporterPresented: Bool = false
 
     public init(state: AppState) {
         self.state = state
@@ -25,12 +29,16 @@ public struct HomeView: View {
                     topBar
 
                     if let banner = state.statusBannerText {
-                        HStack {
+                        HStack(spacing: 8) {
+                            Image(systemName: "info.circle.fill")
+                                .font(.caption)
+                                .foregroundStyle(.white)
                             Text(banner)
                                 .font(.caption)
                                 .foregroundStyle(.white)
+                                .lineLimit(2)
                             Spacer()
-                            Button("Dismiss") {
+                            Button("OK") {
                                 state.statusBannerText = nil
                             }
                             .font(.caption.bold())
@@ -38,7 +46,14 @@ public struct HomeView: View {
                         }
                         .padding(.horizontal, 14)
                         .padding(.vertical, 8)
-                        .background(Color.orange.opacity(0.85))
+                        .background(accentColor.opacity(0.92))
+                    }
+
+                    // Active Spec Bar if Spec Mode created a document
+                    if let chat = state.activeChat, let spec = chat.specDocument {
+                        specProgressCard(spec: spec, chatId: chat.id)
+                            .padding(.horizontal, 14)
+                            .padding(.top, 6)
                     }
 
                     // Main Chat or Home Greeting
@@ -48,7 +63,7 @@ public struct HomeView: View {
                         homeZeroStateGreeting
                     }
 
-                    // Composer Box & Repo/Branch Pickers (Kiro + Arena layout)
+                    // Composer Box & Repo/Branch Pickers
                     composerSection
                 }
                 .background(Color(UIColor.systemBackground))
@@ -57,7 +72,7 @@ public struct HomeView: View {
 
             // Slide-out Side Menu
             if state.isSideMenuOpen {
-                Color.black.opacity(0.45)
+                Color.black.opacity(0.48)
                     .ignoresSafeArea()
                     .onTapGesture {
                         withAnimation(.easeOut(duration: 0.2)) {
@@ -66,12 +81,54 @@ public struct HomeView: View {
                     }
 
                 SideMenuView(state: state, accentColor: accentColor)
-                    .frame(width: 300)
+                    .frame(width: 308)
                     .transition(.move(edge: .leading))
+            }
+        }
+        .onChange(of: selectedPhotoItem) { _, newItem in
+            guard let newItem else { return }
+            Task {
+                if let data = try? await newItem.loadTransferable(type: Data.self) {
+                    let b64 = data.base64EncodedString()
+                    let att = ChatAttachmentItem(
+                        name: "Photo-\(Int(Date().timeIntervalSince1970)).jpg",
+                        kind: .photo,
+                        mimeType: "image/jpeg",
+                        textPreview: "[Attached iPhone Photo (\(data.count) bytes)]",
+                        base64Data: b64,
+                        sizeBytes: data.count
+                    )
+                    state.pendingAttachments.append(att)
+                }
+                selectedPhotoItem = nil
+            }
+        }
+        .fileImporter(
+            isPresented: $isFileImporterPresented,
+            allowedContentTypes: [.item, .plainText, .sourceCode, .json, .image, .pdf],
+            allowsMultipleSelection: false
+        ) { result in
+            if case .success(let urls) = result, let url = urls.first {
+                let secured = url.startAccessingSecurityScopedResource()
+                defer { if secured { url.stopAccessingSecurityScopedResource() } }
+                if let data = try? Data(contentsOf: url) {
+                    let textPreview = String(data: data, encoding: .utf8).map { String($0.prefix(3000)) }
+                    let att = ChatAttachmentItem(
+                        name: url.lastPathComponent,
+                        kind: .file,
+                        mimeType: "application/octet-stream",
+                        textPreview: textPreview ?? "[Binary file: \(url.lastPathComponent) (\(data.count) bytes)]",
+                        sizeBytes: data.count
+                    )
+                    state.pendingAttachments.append(att)
+                }
             }
         }
         .sheet(isPresented: $state.isFilesSheetPresented) {
             RepoFilesSheet(state: state, accentColor: accentColor)
+        }
+        .sheet(isPresented: $state.isBuildsSheetPresented) {
+            BuildsAndActionsSheet(state: state, accentColor: accentColor)
         }
         .sheet(isPresented: $state.isRepoPickerPresented) {
             RepoPickerSheet(state: state, accentColor: accentColor)
@@ -81,6 +138,9 @@ public struct HomeView: View {
         }
         .sheet(isPresented: $state.isModelPickerPresented) {
             ModelPickerSheet(state: state, accentColor: accentColor)
+        }
+        .sheet(isPresented: $state.isGroupPickerPresented) {
+            GroupPickerSheet(state: state, accentColor: accentColor)
         }
         .sheet(isPresented: $state.isSettingsPresented) {
             SettingsSheetView(state: state, accentColor: accentColor)
@@ -94,21 +154,24 @@ public struct HomeView: View {
         .sheet(isPresented: $state.isConnectionsSheetPresented) {
             ConnectionsRegistrySheet(state: state, accentColor: accentColor)
         }
+        .sheet(isPresented: $state.isLivePreviewPresented) {
+            LiveWebPreviewSheet(state: state, accentColor: accentColor)
+        }
     }
 
-    // MARK: - Top Bar (Side-menu button left, Cost counter middle, Files button right)
+    // MARK: - Top Bar (Side-menu button left, Cost counter middle, Undo / Builds / Files right)
 
     private var topBar: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 10) {
             Button {
                 withAnimation(.easeOut(duration: 0.2)) {
                     state.isSideMenuOpen.toggle()
                 }
             } label: {
                 Image(systemName: "sidebar.left")
-                    .font(.system(size: 18, weight: .semibold))
+                    .font(.system(size: 17, weight: .semibold))
                     .foregroundStyle(.primary)
-                    .frame(width: 38, height: 38)
+                    .frame(width: 36, height: 36)
                     .background(Color(UIColor.secondarySystemBackground))
                     .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             }
@@ -116,9 +179,22 @@ public struct HomeView: View {
             Spacer()
 
             VStack(spacing: 2) {
-                Text(state.activeChat?.title ?? "MAIPA-G")
-                    .font(.subheadline.weight(.semibold))
-                    .lineLimit(1)
+                HStack(spacing: 5) {
+                    Text(state.activeChat?.title ?? "New chat")
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+
+                    if let groupId = state.activeChat?.groupId,
+                       let grp = state.groups.first(where: { $0.id == groupId }) {
+                        Text(grp.name)
+                            .font(.system(size: 10, weight: .semibold))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(accentColor.opacity(0.18))
+                            .foregroundStyle(accentColor)
+                            .clipShape(Capsule())
+                    }
+                }
 
                 HStack(spacing: 6) {
                     let chatCost = state.activeChat?.totalCostUSD ?? 0.0
@@ -139,28 +215,66 @@ public struct HomeView: View {
 
             Spacer()
 
-            Button {
-                state.isFilesSheetPresented = true
-            } label: {
-                Image(systemName: "folder")
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(.primary)
-                    .frame(width: 38, height: 38)
-                    .background(Color(UIColor.secondarySystemBackground))
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            HStack(spacing: 6) {
+                // 1-Tap Undo button when the chat has a saved change (Item 9 & Answer 9)
+                if let chat = state.activeChat,
+                   let receipt = chat.lastSavedReceipt,
+                   receipt.state != .undone && receipt.state != .thrownAway {
+                    Button {
+                        Task {
+                            await state.undoLastSavedChange(inChatId: chat.id)
+                        }
+                    } label: {
+                        Image(systemName: "arrow.uturn.backward")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(.orange)
+                            .frame(width: 34, height: 34)
+                            .background(Color.orange.opacity(0.15))
+                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    }
+                    .accessibilityLabel("Undo last saved change")
+                }
+
+                // Builds / GitHub Actions button when a repo is selected (Build 3)
+                if state.selectedRepo != nil {
+                    Button {
+                        state.isBuildsSheetPresented = true
+                    } label: {
+                        Image(systemName: "hammer")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(.primary)
+                            .frame(width: 34, height: 34)
+                            .background(Color(UIColor.secondarySystemBackground))
+                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    }
+                    .accessibilityLabel("Builds and GitHub Actions")
+                }
+
+                // Files Browser & Editor button
+                Button {
+                    state.isFilesSheetPresented = true
+                } label: {
+                    Image(systemName: "folder")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .frame(width: 36, height: 36)
+                        .background(Color(UIColor.secondarySystemBackground))
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+                .accessibilityLabel("Repository Files")
             }
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+        .padding(.vertical, 8)
         .background(Color(UIColor.systemBackground))
     }
 
-    // MARK: - Home Greeting & Connections Row
+    // MARK: - Home Greeting & Uncluttered Connections Row
 
     private var homeZeroStateGreeting: some View {
         ScrollView {
-            VStack(spacing: 20) {
-                Spacer(minLength: 28)
+            VStack(spacing: 18) {
+                Spacer(minLength: 22)
 
                 if state.settings.showMascotOnHome {
                     MAIPAGMascotView(
@@ -174,14 +288,23 @@ public struct HomeView: View {
                         .font(.system(size: 26, weight: .bold, design: .serif))
                         .multilineTextAlignment(.center)
 
-                    Text("Pick a repo below, read or search any file, or plan your next change.")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 24)
+                    if let repo = state.selectedRepo {
+                        Text("Connected to \(repo.fullName) (\(state.selectedBranchName)). Read, search, or edit files, or run a build.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 24)
+                    } else {
+                        Text("Start chatting right away, or pick a GitHub repo below when you want to work on code.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 24)
+                    }
                 }
 
-                // Connection Chips Row (Arena + Kiro style)
+                // Clean Connection Chips Row:
+                // Only shows GitHub, OpenRouter, any connector you actually turned on, and "+ Connectors"
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
                         Button {
@@ -193,7 +316,7 @@ public struct HomeView: View {
                                 Text(state.githubToken != nil ? "GitHub ✓" : "Connect GitHub")
                                     .font(.caption.weight(.semibold))
                             }
-                            .padding(.horizontal, 11)
+                            .padding(.horizontal, 12)
                             .padding(.vertical, 7)
                             .background(state.githubToken != nil ? accentColor.opacity(0.18) : Color(UIColor.secondarySystemBackground))
                             .foregroundStyle(state.githubToken != nil ? accentColor : .primary)
@@ -211,14 +334,14 @@ public struct HomeView: View {
                                 Text(state.openRouterKey != nil ? "OpenRouter ✓" : "Sign in with OpenRouter")
                                     .font(.caption.weight(.semibold))
                             }
-                            .padding(.horizontal, 11)
+                            .padding(.horizontal, 12)
                             .padding(.vertical, 7)
                             .background(state.openRouterKey != nil ? accentColor.opacity(0.18) : Color(UIColor.secondarySystemBackground))
                             .foregroundStyle(state.openRouterKey != nil ? accentColor : .primary)
                             .clipShape(Capsule())
                         }
 
-                        ForEach(state.connectors.filter { $0.id != "github" }.prefix(4)) { conn in
+                        ForEach(state.homeVisibleThirdPartyConnectors) { conn in
                             Button {
                                 state.isConnectionsSheetPresented = true
                             } label: {
@@ -230,8 +353,8 @@ public struct HomeView: View {
                                 }
                                 .padding(.horizontal, 11)
                                 .padding(.vertical, 7)
-                                .background(Color(UIColor.secondarySystemBackground))
-                                .foregroundStyle(.secondary)
+                                .background(conn.isConnected ? accentColor.opacity(0.15) : Color(UIColor.secondarySystemBackground))
+                                .foregroundStyle(conn.isConnected ? accentColor : .secondary)
                                 .clipShape(Capsule())
                             }
                         }
@@ -239,50 +362,119 @@ public struct HomeView: View {
                         Button {
                             state.isConnectionsSheetPresented = true
                         } label: {
-                            Text("All connectors…")
-                                .font(.caption.weight(.medium))
-                                .padding(.horizontal, 11)
-                                .padding(.vertical, 7)
-                                .background(Color(UIColor.secondarySystemBackground))
-                                .foregroundStyle(.secondary)
-                                .clipShape(Capsule())
+                            HStack(spacing: 4) {
+                                Image(systemName: "plus.circle")
+                                    .font(.caption)
+                                Text("Connectors")
+                                    .font(.caption.weight(.medium))
+                            }
+                            .padding(.horizontal, 11)
+                            .padding(.vertical, 7)
+                            .background(Color(UIColor.secondarySystemBackground))
+                            .foregroundStyle(.secondary)
+                            .clipShape(Capsule())
                         }
                     }
                     .padding(.horizontal, 16)
                 }
 
-                // Quick Starter Prompts for the picked repo
+                // Adaptive Starter Actions (adapts to whether a repo is selected or not)
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Quick repo actions")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 4)
+                    if let repo = state.selectedRepo {
+                        Text("Quick actions for \(repo.name)")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 4)
 
-                    quickStarterButton(
-                        title: "Read .kiro/notes/PLAN.md and summarize Build 1",
-                        icon: "doc.text.magnifyingglass"
-                    )
-                    quickStarterButton(
-                        title: "List all files in the selected repository",
-                        icon: "folder.badge.gearshape"
-                    )
-                    quickStarterButton(
-                        title: "Search the repo for owner rules and workflow steps",
-                        icon: "magnifyingglass"
-                    )
+                        quickStarterButton(
+                            title: "List and summarize the files in \(repo.name)",
+                            icon: "folder.badge.gearshape"
+                        )
+                        quickStarterButton(
+                            title: "Search \(repo.name) for bugs, TODOs, or build issues",
+                            icon: "magnifyingglass"
+                        )
+                        quickStarterButton(
+                            title: "Build with spec: plan a new feature for \(repo.name)",
+                            icon: "list.clipboard"
+                        ) {
+                            if let idx = state.chats.firstIndex(where: { $0.id == state.activeChatId }) {
+                                state.chats[idx].specModeEnabled = true
+                            }
+                            Task {
+                                await state.sendCurrentMessage(overrideText: "Plan a new feature for \(repo.name) with a step-by-step spec.")
+                            }
+                        }
+                    } else {
+                        Text("Get started")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 4)
+
+                        Button {
+                            if state.githubToken == nil {
+                                state.isGitHubSignInPresented = true
+                            } else {
+                                state.isRepoPickerPresented = true
+                            }
+                        } label: {
+                            HStack(spacing: 10) {
+                                Image(systemName: "book.closed.fill")
+                                    .font(.subheadline)
+                                    .foregroundStyle(accentColor)
+                                    .frame(width: 24)
+                                Text(state.githubToken == nil ? "Connect GitHub to pick a repository" : "Pick a GitHub repository for this chat")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.primary)
+                                    .multilineTextAlignment(.leading)
+                                Spacer()
+                                Image(systemName: "chevron.right")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(12)
+                            .background(Color(UIColor.secondarySystemBackground))
+                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        }
+
+                        quickStarterButton(
+                            title: "Plan a new app or game with Build with spec",
+                            icon: "list.clipboard"
+                        ) {
+                            if let idx = state.chats.firstIndex(where: { $0.id == state.activeChatId }) {
+                                state.chats[idx].specModeEnabled = true
+                            }
+                            Task {
+                                await state.sendCurrentMessage(overrideText: "Help me plan a new iPhone app or game step by step.")
+                            }
+                        }
+
+                        quickStarterButton(
+                            title: "Run a multi-step agent workflow",
+                            icon: "arrow.triangle.2.circlepath"
+                        ) {
+                            withAnimation(.easeOut(duration: 0.2)) {
+                                state.isSideMenuOpen = true
+                            }
+                        }
+                    }
                 }
                 .padding(.horizontal, 16)
                 .padding(.top, 4)
 
-                Spacer(minLength: 20)
+                Spacer(minLength: 16)
             }
         }
     }
 
-    private func quickStarterButton(title: String, icon: String) -> some View {
+    private func quickStarterButton(title: String, icon: String, customAction: (() -> Void)? = nil) -> some View {
         Button {
-            Task {
-                await state.sendCurrentMessage(overrideText: title)
+            if let customAction {
+                customAction()
+            } else {
+                Task {
+                    await state.sendCurrentMessage(overrideText: title)
+                }
             }
         } label: {
             HStack(spacing: 10) {
@@ -305,7 +497,78 @@ public struct HomeView: View {
         }
     }
 
-    // MARK: - Chat Messages List (Collapsible Tool Lines + Numbered Question Buttons)
+    // MARK: - Interactive Spec Card (Item 6 & Answer 25)
+
+    private func specProgressCard(spec: SpecPlanDocument, chatId: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label("Spec: \(spec.title)", systemImage: "list.clipboard.fill")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(accentColor)
+                Spacer()
+                Text(spec.stage == .whatItWillBuild ? "Step 1: What it'll build" : (spec.stage == .howItWorks ? "Step 2: How it works" : (spec.stage == .taskChecklist ? "Step 3: Task list" : "Approved ✓")))
+                    .font(.caption2.weight(.semibold))
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(accentColor.opacity(0.16))
+                    .foregroundStyle(accentColor)
+                    .clipShape(Capsule())
+            }
+
+            if spec.stage == .whatItWillBuild {
+                Text(spec.whatItWillBuild)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else if spec.stage == .howItWorks {
+                Text(spec.howItWorks)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(spec.tasks) { task in
+                        Button {
+                            state.toggleSpecTask(taskId: task.id, inChatId: chatId)
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: task.isCompleted ? "checkmark.circle.fill" : "circle")
+                                    .font(.caption)
+                                    .foregroundStyle(task.isCompleted ? .green : .secondary)
+                                Text("\(task.number). \(task.title)")
+                                    .font(.caption)
+                                    .foregroundStyle(.primary)
+                                    .strikethrough(task.isCompleted)
+                                Spacer()
+                            }
+                        }
+                    }
+                }
+            }
+
+            if spec.stage != .building {
+                HStack {
+                    Spacer()
+                    Button {
+                        Task {
+                            await state.approveNextSpecStage(inChatId: chatId)
+                        }
+                    } label: {
+                        Text(spec.stage == .taskChecklist ? "OK, approve & save spec" : "OK, next step →")
+                            .font(.caption.weight(.semibold))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(accentColor)
+                            .foregroundStyle(.white)
+                            .clipShape(Capsule())
+                    }
+                }
+            }
+        }
+        .padding(12)
+        .background(Color(UIColor.secondarySystemBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    // MARK: - Chat Messages List (Collapsible Tool Lines + PR Add/Throw Away + Numbered Question Buttons)
 
     private func chatMessagesList(chat: ChatThread) -> some View {
         ScrollViewReader { proxy in
@@ -321,7 +584,11 @@ public struct HomeView: View {
             }
             .onChange(of: chat.messages.count) { _, _ in
                 if let lastId = chat.messages.last?.id {
-                    withAnimation {
+                    if state.settings.smoothChatTransitionsEnabled {
+                        withAnimation {
+                            proxy.scrollTo(lastId, anchor: .bottom)
+                        }
+                    } else {
                         proxy.scrollTo(lastId, anchor: .bottom)
                     }
                 }
@@ -331,16 +598,42 @@ public struct HomeView: View {
 
     private func messageRow(msg: ChatMessage, chatId: String) -> some View {
         VStack(alignment: msg.role == .user ? .trailing : .leading, spacing: 8) {
-            // Tool Call Lines (each thing the AI does shows as a small line he can tap open)
+            // Attachment pills on user messages
+            if !msg.attachments.isEmpty {
+                HStack(spacing: 6) {
+                    ForEach(msg.attachments) { att in
+                        HStack(spacing: 4) {
+                            Image(systemName: att.kind == .photo ? "photo.fill" : "doc.fill")
+                                .font(.caption2)
+                            Text(att.name)
+                                .font(.caption2)
+                                .lineLimit(1)
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color(UIColor.secondarySystemBackground))
+                        .clipShape(Capsule())
+                    }
+                }
+            }
+
+            // Tool Call Lines (each thing the AI does shows as a small line you can tap open)
             if !msg.toolCalls.isEmpty {
                 VStack(alignment: .leading, spacing: 5) {
                     ForEach(msg.toolCalls) { step in
                         VStack(alignment: .leading, spacing: 4) {
                             Button {
-                                if expandedToolIds.contains(step.id) {
-                                    expandedToolIds.remove(step.id)
+                                let toggle = {
+                                    if expandedToolIds.contains(step.id) {
+                                        expandedToolIds.remove(step.id)
+                                    } else {
+                                        expandedToolIds.insert(step.id)
+                                    }
+                                }
+                                if state.settings.toolStepAnimationsEnabled {
+                                    withAnimation(.easeInOut(duration: 0.18)) { toggle() }
                                 } else {
-                                    expandedToolIds.insert(step.id)
+                                    toggle()
                                 }
                             } label: {
                                 HStack(spacing: 6) {
@@ -387,6 +680,19 @@ public struct HomeView: View {
                     .font(.body)
                     .foregroundStyle(msg.role == .user ? .white : .primary)
 
+                if !msg.autoSavedMemories.isEmpty {
+                    ForEach(msg.autoSavedMemories, id: \.self) { note in
+                        HStack(spacing: 4) {
+                            Image(systemName: "brain.head.profile")
+                                .font(.caption2)
+                            Text("Saved memory: \(note)")
+                                .font(.caption2)
+                        }
+                        .foregroundStyle(accentColor)
+                        .padding(.top, 2)
+                    }
+                }
+
                 HStack(spacing: 8) {
                     if let model = msg.modelUsed, msg.role == .assistant {
                         Text(model)
@@ -411,6 +717,11 @@ public struct HomeView: View {
             .padding(12)
             .background(msg.role == .user ? accentColor : Color(UIColor.secondarySystemBackground))
             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+            // Build 2: Pull Request "Add it" / "Throw away" & Undo Card (Answer 9)
+            if let receipt = msg.savedChangeReceipt {
+                savedChangeCard(receipt: receipt, chatId: chatId, messageId: msg.id)
+            }
 
             // Numbered Questions with Tappable Option Buttons
             if !msg.questions.isEmpty {
@@ -450,11 +761,80 @@ public struct HomeView: View {
         .frame(maxWidth: .infinity, alignment: msg.role == .user ? .trailing : .leading)
     }
 
+    private func savedChangeCard(receipt: SavedChangeReceipt, chatId: String, messageId: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Image(systemName: "arrow.triangle.pull")
+                    .foregroundStyle(accentColor)
+                Text(receipt.prNumber != nil ? "Pull Request #\(receipt.prNumber!) (\(receipt.workingBranch) → \(receipt.baseBranch))" : "Saved to \(receipt.workingBranch)")
+                    .font(.caption.weight(.semibold))
+                Spacer()
+                Text(receipt.state.rawValue.replacingOccurrences(of: "_", with: " ").capitalized)
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(.secondary)
+            }
+
+            if receipt.state == .pendingPR {
+                HStack(spacing: 10) {
+                    Button {
+                        Task {
+                            await state.approveAndMergePR(receipt: receipt, inChatId: chatId, messageId: messageId)
+                        }
+                    } label: {
+                        Label("Add it", systemImage: "checkmark.circle.fill")
+                            .font(.caption.weight(.semibold))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 7)
+                            .background(Color.green.opacity(0.2))
+                            .foregroundStyle(.green)
+                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    }
+
+                    Button {
+                        Task {
+                            await state.discardPR(receipt: receipt, inChatId: chatId, messageId: messageId)
+                        }
+                    } label: {
+                        Label("Throw away", systemImage: "trash")
+                            .font(.caption.weight(.semibold))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 7)
+                            .background(Color.red.opacity(0.16))
+                            .foregroundStyle(.red)
+                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    }
+
+                    if let prURL = receipt.prURL, let url = URL(string: prURL) {
+                        Link("View PR", destination: url)
+                            .font(.caption.weight(.medium))
+                    }
+                }
+            } else if receipt.state == .savedDirect {
+                Button {
+                    Task {
+                        await state.undoLastSavedChange(inChatId: chatId)
+                    }
+                } label: {
+                    Label("Undo this save", systemImage: "arrow.uturn.backward")
+                        .font(.caption.weight(.semibold))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                        .background(Color.orange.opacity(0.18))
+                        .foregroundStyle(.orange)
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+            }
+        }
+        .padding(10)
+        .background(Color(UIColor.secondarySystemBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
     // MARK: - Composer Box & Repo/Branch Pickers (Kiro + Arena Design)
 
     private var composerSection: some View {
         VStack(spacing: 8) {
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 9) {
                 // Top chip row inside message box: Build with spec, Add to group, AI picker, Thinking level, Autonomous switch
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
@@ -478,6 +858,24 @@ public struct HomeView: View {
                             .clipShape(Capsule())
                         }
 
+                        // Add to group (Kiro composer chip — PLAN.md line 17 & 24)
+                        Button {
+                            state.isGroupPickerPresented = true
+                        } label: {
+                            let hasGroup = state.activeChat?.groupId != nil
+                            HStack(spacing: 4) {
+                                Image(systemName: "folder.badge.plus")
+                                    .font(.caption2)
+                                Text("Add to group")
+                                    .font(.caption2.weight(.semibold))
+                            }
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 5)
+                            .background(hasGroup ? accentColor.opacity(0.22) : Color(UIColor.tertiarySystemBackground))
+                            .foregroundStyle(hasGroup ? accentColor : .secondary)
+                            .clipShape(Capsule())
+                        }
+
                         // AI Model Picker button ("Auto" / "Claude Opus 5.5")
                         Button {
                             state.isModelPickerPresented = true
@@ -488,7 +886,7 @@ public struct HomeView: View {
                                 Text(selectedModelOption.name)
                                     .font(.caption2.weight(.semibold))
                                 Image(systemName: "chevron.up.chevron.down")
-                                    .font(.system(size: 9))
+                                    .font(.system(size: 8))
                             }
                             .padding(.horizontal, 9)
                             .padding(.vertical, 5)
@@ -497,7 +895,7 @@ public struct HomeView: View {
                             .clipShape(Capsule())
                         }
 
-                        // Thinking Level Picker (ONLY shown when the chosen AI supports thinking levels — Answer 6)
+                        // Thinking Level Picker (ONLY shown when chosen AI supports thinking — Answer 6)
                         if selectedModelOption.supportsThinking {
                             Menu {
                                 ForEach(ThinkingLevel.allCases, id: \.self) { level in
@@ -552,6 +950,35 @@ public struct HomeView: View {
                     }
                 }
 
+                // Pending Attachments Strip (Photos & Files)
+                if !state.pendingAttachments.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 6) {
+                            ForEach(state.pendingAttachments) { att in
+                                HStack(spacing: 5) {
+                                    Image(systemName: att.kind == .photo ? "photo.fill" : "doc.text.fill")
+                                        .font(.caption2)
+                                        .foregroundStyle(accentColor)
+                                    Text(att.name)
+                                        .font(.caption2)
+                                        .lineLimit(1)
+                                    Button {
+                                        state.pendingAttachments.removeAll(where: { $0.id == att.id })
+                                    } label: {
+                                        Image(systemName: "xmark.circle.fill")
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(Color(UIColor.tertiarySystemBackground))
+                                .clipShape(Capsule())
+                            }
+                        }
+                    }
+                }
+
                 // Message Input Field
                 HStack(alignment: .bottom, spacing: 8) {
                     TextField("Ask anything...", text: $state.draftMessage, axis: .vertical)
@@ -559,6 +986,7 @@ public struct HomeView: View {
                         .font(.subheadline)
                         .padding(.vertical, 4)
 
+                    let canSend = (!state.draftMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !state.pendingAttachments.isEmpty) && !state.isSendingMessage
                     Button {
                         Task {
                             await state.sendCurrentMessage()
@@ -568,14 +996,14 @@ public struct HomeView: View {
                             .font(.system(size: 14, weight: .bold))
                             .foregroundStyle(.white)
                             .frame(width: 32, height: 32)
-                            .background(state.draftMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? Color.gray.opacity(0.4) : accentColor)
+                            .background(canSend ? accentColor : Color.gray.opacity(0.4))
                             .clipShape(Circle())
                     }
-                    .disabled(state.draftMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || state.isSendingMessage)
+                    .disabled(!canSend)
                 }
 
-                // Bottom toolbar inside box: Web search, Attach, Group
-                HStack(spacing: 12) {
+                // Bottom toolbar inside box: Web search, Attach (Photos + Files), Live Preview, Route status
+                HStack(spacing: 14) {
                     Button {
                         if let idx = state.chats.firstIndex(where: { $0.id == state.activeChatId }) {
                             state.chats[idx].webSearchEnabled.toggle()
@@ -591,13 +1019,48 @@ public struct HomeView: View {
                         .foregroundStyle(webOn ? accentColor : .secondary)
                     }
 
-                    Button {
-                        state.isFilesSheetPresented = true
+                    // Attach Menu (PhotosPicker + File Importer + Repo File)
+                    Menu {
+                        Button {
+                            isFileImporterPresented = true
+                        } label: {
+                            Label("Attach File from iPhone", systemImage: "doc.badge.plus")
+                        }
+
+                        if state.selectedRepo != nil {
+                            Button {
+                                state.isFilesSheetPresented = true
+                            } label: {
+                                Label("Browse or Edit Repo Files", systemImage: "folder")
+                            }
+                        }
                     } label: {
                         HStack(spacing: 4) {
                             Image(systemName: "paperclip")
                                 .font(.caption)
                             Text("Attach")
+                                .font(.caption2.weight(.medium))
+                        }
+                        .foregroundStyle(.secondary)
+                    }
+
+                    PhotosPicker(selection: $selectedPhotoItem, matching: .images) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "photo")
+                                .font(.caption)
+                            Text("Photo")
+                                .font(.caption2.weight(.medium))
+                        }
+                        .foregroundStyle(.secondary)
+                    }
+
+                    Button {
+                        state.isLivePreviewPresented = true
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "play.display")
+                                .font(.caption)
+                            Text("Preview")
                                 .font(.caption2.weight(.medium))
                         }
                         .foregroundStyle(.secondary)
@@ -624,10 +1087,14 @@ public struct HomeView: View {
             .background(Color(UIColor.secondarySystemBackground))
             .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
 
-            // Under message box: Repo picker + Branch picker + Gear + X (Arena & Kiro combined bar)
+            // Under message box: Repo picker + Branch picker (only when repo is picked) + Gear + X
             HStack(spacing: 8) {
                 Button {
-                    state.isRepoPickerPresented = true
+                    if state.githubToken == nil {
+                        state.isGitHubSignInPresented = true
+                    } else {
+                        state.isRepoPickerPresented = true
+                    }
                 } label: {
                     HStack(spacing: 5) {
                         Image(systemName: "book.closed")
@@ -641,7 +1108,7 @@ public struct HomeView: View {
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)
                     .background(Color(UIColor.secondarySystemBackground))
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(state.selectedRepo != nil ? .primary : .secondary)
                     .clipShape(Capsule())
                 }
 
@@ -690,6 +1157,7 @@ public struct HomeView: View {
                             .background(Color(UIColor.secondarySystemBackground))
                             .clipShape(Circle())
                     }
+                    .accessibilityLabel("Disconnect repository from this chat")
                 }
             }
         }
