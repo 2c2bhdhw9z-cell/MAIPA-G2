@@ -67,9 +67,7 @@ final class AgentCoreTests: XCTestCase {
     func testBranchSavePolicyRespectsContinuumAndSideBranches() {
         let gh = GitHubService()
         let settings = AppSettings()
-        // Normal repo on main branch uses a side branch + PR (returns false for straight-to-branch)
         XCTAssertFalse(gh.shouldSaveStraightToBranch(fullName: "2c2bhdhw9z-cell/MAIPA-G2", pickedBranch: "main", defaultBranch: "main", settings: settings))
-        // Continuum repo saves straight to master
         XCTAssertTrue(gh.shouldSaveStraightToBranch(fullName: "2c2bhdhw9z-cell/Continuum-", pickedBranch: "master", defaultBranch: "master", settings: settings))
     }
 
@@ -85,5 +83,34 @@ final class AgentCoreTests: XCTestCase {
         XCTAssertEqual(questions.count, 1)
         XCTAssertEqual(questions[0].number, 1)
         XCTAssertEqual(questions[0].options, ["main", "dev"])
+    }
+
+    func testExtractFileOperationsAndSafetyConfirmation() {
+        let sample = """
+        Updating your README and removing old file:
+        [WRITE_FILE: README.md]
+        # Updated Title
+        [/WRITE_FILE]
+        [DELETE_FILE: old.txt]
+        """
+        let (cleaned, ops) = OpenRouterService.extractFileOperations(from: sample)
+        XCTAssertEqual(ops.count, 2)
+        XCTAssertEqual(ops[0].path, "README.md")
+        XCTAssertEqual(ops[0].kind, .update)
+        XCTAssertEqual(ops[1].path, "old.txt")
+        XCTAssertEqual(ops[1].kind, .delete)
+        XCTAssertTrue(cleaned.contains("Saved update for `README.md`"))
+
+        let safetyQ = OpenRouterService.requiresSafetyConfirmation(operations: ops, userPrompt: "Clean up the repo", isAutonomous: false)
+        XCTAssertNotNil(safetyQ)
+
+        let confirmedQ = OpenRouterService.requiresSafetyConfirmation(operations: ops, userPrompt: "Yes, go ahead and clean up", isAutonomous: false)
+        XCTAssertNil(confirmedQ)
+    }
+
+    func testExtractOrGenerateImageURL() {
+        let (_, imgURL) = OpenRouterService.extractOrGenerateImageURL(from: "Here is your icon [GENERATE_IMAGE: MAIPA-G Robot]", userPrompt: "Make an icon")
+        XCTAssertNotNil(imgURL)
+        XCTAssertTrue(imgURL?.hasPrefix("data:image/svg+xml;base64,") == true)
     }
 }

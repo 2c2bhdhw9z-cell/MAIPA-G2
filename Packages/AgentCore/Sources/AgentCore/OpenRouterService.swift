@@ -128,7 +128,7 @@ public enum AutoModelRouter {
     }
 }
 
-// MARK: - OpenRouter Service (PKCE OAuth, Balance, Web Search, Tool-Calling Chat)
+// MARK: - OpenRouter Service (PKCE OAuth, Balance, Web Search, Tool-Calling Chat, File Saves & Picture Generation)
 
 public struct OpenRouterBalanceInfo: Codable, Equatable, Sendable {
     public let remainingUSD: Double
@@ -153,6 +153,8 @@ public struct AgentTurnResult: Sendable {
     public let autoSavedMemories: [String]
     public let generatedSpec: SpecPlanDocument?
     public let pausedForCostLimit: Bool
+    public let savedChangeReceipt: SavedChangeReceipt?
+    public let generatedImageURL: String?
 
     public init(
         assistantText: String,
@@ -162,7 +164,9 @@ public struct AgentTurnResult: Sendable {
         questions: [NumberedQuestionItem] = [],
         autoSavedMemories: [String] = [],
         generatedSpec: SpecPlanDocument? = nil,
-        pausedForCostLimit: Bool = false
+        pausedForCostLimit: Bool = false,
+        savedChangeReceipt: SavedChangeReceipt? = nil,
+        generatedImageURL: String? = nil
     ) {
         self.assistantText = assistantText
         self.modelUsed = modelUsed
@@ -172,6 +176,8 @@ public struct AgentTurnResult: Sendable {
         self.autoSavedMemories = autoSavedMemories
         self.generatedSpec = generatedSpec
         self.pausedForCostLimit = pausedForCostLimit
+        self.savedChangeReceipt = savedChangeReceipt
+        self.generatedImageURL = generatedImageURL
     }
 }
 
@@ -277,7 +283,6 @@ public final class OpenRouterService: @unchecked Sendable {
 
     public static func stripHTMLTags(from html: String) -> String {
         var result = html
-        // Remove script and style blocks
         if let scriptRegex = try? NSRegularExpression(pattern: "<(script|style)[^>]*>[\\s\\S]*?</\\1>", options: [.caseInsensitive]) {
             result = scriptRegex.stringByReplacingMatches(in: result, range: NSRange(result.startIndex..., in: result), withTemplate: " ")
         }
@@ -334,6 +339,7 @@ public final class OpenRouterService: @unchecked Sendable {
 
         var recordedTools: [ToolCallItem] = []
         var repoContextSnippet = ""
+        var repoDefaultBranch = thread.branchName ?? "main"
 
         // Log active Agent or Workflow steps if selected (Build 4)
         if let wfId = thread.activeWorkflowId,
@@ -428,6 +434,7 @@ public final class OpenRouterService: @unchecked Sendable {
         // Gather live repo context ONLY when the user has actually selected a repository
         if let repoFullName = thread.repoFullName, !repoFullName.isEmpty {
             let branch = thread.branchName ?? "main"
+            repoDefaultBranch = branch
             let lower = userPrompt.lowercased()
 
             var listStep = ToolCallItem(
@@ -516,6 +523,24 @@ public final class OpenRouterService: @unchecked Sendable {
                         }
                     }
                 }
+
+                // Answer 11: Automatically check repo GitHub Actions builds when enabled
+                if settings.autoCheckRepoBuildsEnabled,
+                   let runs = try? await githubService.fetchWorkflowRuns(fullName: repoFullName, token: githubToken),
+                   let latestRun = runs.first {
+                    let buildSummary = "Latest build #\(latestRun.runNumber) (\(latestRun.name)): \(latestRun.status) \(latestRun.conclusion ?? "")"
+                    let buildStep = ToolCallItem(
+                        toolName: "check_repo_build",
+                        summaryLine: buildSummary,
+                        inputSummary: repoFullName,
+                        outputDetail: "Run #\(latestRun.runNumber) on branch \(latestRun.headBranch) — \(latestRun.htmlURL)",
+                        status: latestRun.conclusion == "failure" ? .failed : .completed,
+                        finishedAt: Date()
+                    )
+                    recordedTools.append(buildStep)
+                    onToolStepUpdate?(buildStep)
+                    repoContextSnippet += "--- Latest GitHub Actions Build ---\n\(buildSummary) (\(latestRun.htmlURL))\n\n"
+                }
             } else {
                 listStep.outputDetail = "Could not reach \(repoFullName) on branch \(branch)."
                 listStep.status = .failed
@@ -530,6 +555,48 @@ public final class OpenRouterService: @unchecked Sendable {
             ? Self.buildSpecDocument(for: userPrompt, existing: thread.specDocument)
             : nil
 
+        // Trigger Autonomous Cloud Runner on GitHub if thread.isAutonomous is enabled & connected to a repo (Build 3 — Item 2)
+        if thread.isAutonomous,
+           let repoFullName = thread.repoFullName, !repoFullName.isEmpty,
+           let token = githubToken, !token.isEmpty {
+            let branch = thread.branchName ?? "main"
+            var cloudStep = ToolCallItem(
+                toolName: "autonomous_cloud_job",
+                summaryLine: "Starting autonomous cloud job on GitHub (\(repoFullName))",
+                inputSummary: userPrompt,
+                status: .running
+            )
+            onToolStepUpdate?(cloudStep)
+            do {
+                let msg = try await githubService.ensureAutonomousCallerWorkflowAndRun(
+                    fullName: repoFullName,
+                    branch: branch,
+                    taskPrompt: userPrompt,
+                    modelId: route.effectiveModelId,
+                    token: token
+                )
+                cloudStep.summaryLine = "Autonomous job running on GitHub's computers"
+                cloudStep.outputDetail = msg
+                cloudStep.status = .completed
+                cloudStep.finishedAt = Date()
+                recordedTools.append(cloudStep)
+                onToolStepUpdate?(cloudStep)
+            } catch {
+                cloudStep.summaryLine = "Autonomous cloud dispatch note"
+                cloudStep.outputDetail = error.localizedDescription
+                cloudStep.status = .completed
+                cloudStep.finishedAt = Date()
+                recordedTools.append(cloudStep)
+                onToolStepUpdate?(cloudStep)
+            }
+        }
+
+        var finalReplyText = ""
+        var finalModelUsed = (openRouterKey ?? "").isEmpty ? "iPhone AI ($0)" : route.effectiveModelId
+        var finalCostUSD = 0.0
+        var savedMems: [String] = []
+        var paused = false
+
         // Call OpenRouter Chat Completions API if key is present
         if let apiKey = openRouterKey, !apiKey.isEmpty, route.effectiveModelId != "apple/foundation" {
             do {
@@ -541,54 +608,123 @@ public final class OpenRouterService: @unchecked Sendable {
                     repoContext: repoContextSnippet,
                     memories: settings.memoriesMasterSwitch ? memories.filter(\.isEnabled) : []
                 )
-                let (cleanReply, savedMems) = Self.extractAutoMemories(from: rawReplyText)
+                let (cleanReply, extractedMems) = Self.extractAutoMemories(from: rawReplyText)
+                finalReplyText = cleanReply
+                finalModelUsed = actualModel
+                finalCostUSD = costUSD
+                savedMems = extractedMems
                 let newTotal = thread.totalCostUSD + costUSD
-                let paused = AutoModelRouter.shouldStopAndAskForCost(
+                paused = AutoModelRouter.shouldStopAndAskForCost(
                     currentJobCostUSD: newTotal,
                     stopSwitchEnabled: settings.stopAndAskAtCostEnabled,
                     thresholdUSD: settings.stopAndAskCostThresholdUSD
                 )
-                var questions = Self.extractNumberedQuestions(from: cleanReply)
-                if paused {
-                    questions.append(
-                        NumberedQuestionItem(
-                            number: questions.count + 1,
-                            prompt: String(format: "This chat has reached $%.4f (your stop-and-ask limit is $%.2f). Keep going?", newTotal, settings.stopAndAskCostThresholdUSD),
-                            options: ["Keep going", "Switch to free AIs ($0)", "Stop here"]
-                        )
-                    )
-                }
-                return AgentTurnResult(
-                    assistantText: cleanReply,
-                    modelUsed: actualModel,
-                    stepCostUSD: costUSD,
-                    toolCalls: recordedTools,
-                    questions: questions,
-                    autoSavedMemories: savedMems,
-                    generatedSpec: generatedSpec,
-                    pausedForCostLimit: paused
-                )
             } catch {
-                // Fall through to local synthesis
+                finalReplyText = buildOnDeviceRepoReply(
+                    userPrompt: userPrompt,
+                    thread: thread,
+                    recordedTools: recordedTools,
+                    repoContext: repoContextSnippet,
+                    hasOpenRouterKey: true
+                )
+            }
+        } else {
+            finalReplyText = buildOnDeviceRepoReply(
+                userPrompt: userPrompt,
+                thread: thread,
+                recordedTools: recordedTools,
+                repoContext: repoContextSnippet,
+                hasOpenRouterKey: !(openRouterKey ?? "").isEmpty
+            )
+        }
+
+        // Parse any AI file edits (`[WRITE_FILE: path]...[/WRITE_FILE]` or `[DELETE_FILE: path]`) (Build 2 — Item 1)
+        let (replyWithoutFileBlocks, fileOps) = Self.extractFileOperations(from: finalReplyText)
+        finalReplyText = replyWithoutFileBlocks
+
+        var questions = Self.extractNumberedQuestions(from: finalReplyText)
+        var savedReceipt: SavedChangeReceipt? = nil
+
+        if !fileOps.isEmpty,
+           let repoFullName = thread.repoFullName, !repoFullName.isEmpty,
+           let token = githubToken, !token.isEmpty {
+            // Answer 12: Ask before deleting files or changing `.github/workflows/` unless user already told us to get on with it
+            if let safetyQuestion = Self.requiresSafetyConfirmation(operations: fileOps, userPrompt: userPrompt, isAutonomous: thread.isAutonomous) {
+                questions.append(safetyQuestion)
+                let safetyStep = ToolCallItem(
+                    toolName: "safety_confirmation",
+                    summaryLine: "Paused to confirm deleting files or editing .github/workflows/",
+                    inputSummary: fileOps.map(\.path).joined(separator: ", "),
+                    outputDetail: safetyQuestion.prompt,
+                    status: .completed,
+                    finishedAt: Date()
+                )
+                recordedTools.append(safetyStep)
+                onToolStepUpdate?(safetyStep)
+            } else {
+                var saveStep = ToolCallItem(
+                    toolName: "save_repo_changes",
+                    summaryLine: "Saving \(fileOps.count) file change(s) to \(repoFullName)",
+                    inputSummary: fileOps.map(\.path).joined(separator: ", "),
+                    status: .running
+                )
+                onToolStepUpdate?(saveStep)
+                do {
+                    let receipt = try await githubService.saveChangesToRepo(
+                        fullName: repoFullName,
+                        pickedBranch: thread.branchName ?? "main",
+                        defaultBranch: repoDefaultBranch,
+                        commitMessage: "MAIPA-G chat update: \(fileOps.map(\.path).joined(separator: ", "))",
+                        operations: fileOps,
+                        settings: settings,
+                        token: token
+                    )
+                    savedReceipt = receipt
+                    saveStep.summaryLine = receipt.state == .pendingPR
+                        ? "Opened Pull Request #\(receipt.prNumber ?? 0) on \(receipt.workingBranch)"
+                        : "Saved \(fileOps.count) file(s) straight to \(receipt.workingBranch)"
+                    saveStep.outputDetail = "Branch: \(receipt.workingBranch)\nCommit: \(receipt.commitSha)"
+                    saveStep.status = .completed
+                    saveStep.finishedAt = Date()
+                    recordedTools.append(saveStep)
+                    onToolStepUpdate?(saveStep)
+                } catch {
+                    saveStep.summaryLine = "Failed to save file changes"
+                    saveStep.outputDetail = error.localizedDescription
+                    saveStep.status = .failed
+                    saveStep.finishedAt = Date()
+                    recordedTools.append(saveStep)
+                    onToolStepUpdate?(saveStep)
+                }
             }
         }
 
-        let fallbackReply = buildOnDeviceRepoReply(
-            userPrompt: userPrompt,
-            thread: thread,
-            recordedTools: recordedTools,
-            repoContext: repoContextSnippet,
-            hasOpenRouterKey: !(openRouterKey ?? "").isEmpty
-        )
-        let questions = Self.extractNumberedQuestions(from: fallbackReply)
+        // Item 5: Picture Generation inline in chat bubbles
+        let (replyCleanedOfImageTag, generatedImgURL) = Self.extractOrGenerateImageURL(from: finalReplyText, userPrompt: userPrompt)
+        finalReplyText = replyCleanedOfImageTag
+
+        if paused {
+            let newTotal = thread.totalCostUSD + finalCostUSD
+            questions.append(
+                NumberedQuestionItem(
+                    number: questions.count + 1,
+                    prompt: String(format: "This chat has reached $%.4f (your stop-and-ask limit is $%.2f). Keep going?", newTotal, settings.stopAndAskCostThresholdUSD),
+                    options: ["Keep going", "Switch to free AIs ($0)", "Stop here"]
+                )
+            )
+        }
+
         return AgentTurnResult(
-            assistantText: fallbackReply,
-            modelUsed: (openRouterKey ?? "").isEmpty ? "iPhone AI ($0)" : route.effectiveModelId,
-            stepCostUSD: 0.0,
+            assistantText: finalReplyText,
+            modelUsed: finalModelUsed,
+            stepCostUSD: finalCostUSD,
             toolCalls: recordedTools,
             questions: questions,
-            autoSavedMemories: [],
-            generatedSpec: generatedSpec
+            autoSavedMemories: savedMems,
+            generatedSpec: generatedSpec,
+            pausedForCostLimit: paused,
+            savedChangeReceipt: savedReceipt,
+            generatedImageURL: generatedImgURL
         )
     }
 
@@ -616,6 +752,12 @@ public final class OpenRouterService: @unchecked Sendable {
         When you need choices from the user, ask short numbered questions like:
         1. Question text? [Option A | Option B]
         When the user tells you a lasting preference to remember for future chats, include `[MEMORY: short note]` on its own line so MAIPA-G saves it automatically.
+        When a repository is connected and the user asks you to create or edit a file in the repository, include:
+        [WRITE_FILE: path/to/file.ext]
+        ...full file content...
+        [/WRITE_FILE]
+        To delete a file when requested, include `[DELETE_FILE: path/to/file.ext]`.
+        When the user asks you to draw or generate a picture/icon, include `[GENERATE_IMAGE: short title]`.
         """
         if let agentId = thread.activeAgentId,
            let agent = AgentPreset.kiroBuiltIns.first(where: { $0.id == agentId }) {
@@ -639,7 +781,6 @@ public final class OpenRouterService: @unchecked Sendable {
         }
         apiMessages.append(["role": "user", "content": userPrompt])
 
-        // If paid web search is allowed (Answer 26 & 7a), enable OpenRouter web search plugin
         var modelToCall = route.effectiveModelId
         if thread.webSearchEnabled && !route.usesFreePoolOnly && !modelToCall.hasSuffix(":online") {
             modelToCall += ":online"
@@ -728,6 +869,125 @@ public final class OpenRouterService: @unchecked Sendable {
             }
         }
         return lines.joined(separator: "\n")
+    }
+
+    // MARK: - Build 2 (Item 1 & Answer 12): Extract File Edits & Safety Confirmations
+
+    public static func extractFileOperations(from text: String) -> (cleanedText: String, operations: [RepoFileEditOperation]) {
+        var operations: [RepoFileEditOperation] = []
+        var working = text
+
+        // 1. Parse [WRITE_FILE: path]...[/WRITE_FILE]
+        if let writeRegex = try? NSRegularExpression(pattern: "\\[WRITE_FILE:\\s*([^\\]]+)\\]\\s*([\\s\\S]*?)\\[/WRITE_FILE\\]", options: [.caseInsensitive]) {
+            let matches = writeRegex.matches(in: working, options: [], range: NSRange(working.startIndex..., in: working))
+            for match in matches.reversed() {
+                if let pathRange = Range(match.range(at: 1), in: working),
+                   let contentRange = Range(match.range(at: 2), in: working),
+                   let fullRange = Range(match.range(at: 0), in: working) {
+                    let path = String(working[pathRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+                    let content = String(working[contentRange]).trimmingCharacters(in: .newlines)
+                    if !path.isEmpty {
+                        operations.insert(RepoFileEditOperation(path: path, kind: .update, content: content), at: 0)
+                    }
+                    working.replaceSubrange(fullRange, with: "\nSaved update for `\(path)`.")
+                }
+            }
+        }
+
+        // 2. Parse [DELETE_FILE: path]
+        if let deleteRegex = try? NSRegularExpression(pattern: "\\[DELETE_FILE:\\s*([^\\]]+)\\]", options: [.caseInsensitive]) {
+            let matches = deleteRegex.matches(in: working, options: [], range: NSRange(working.startIndex..., in: working))
+            for match in matches.reversed() {
+                if let pathRange = Range(match.range(at: 1), in: working),
+                   let fullRange = Range(match.range(at: 0), in: working) {
+                    let path = String(working[pathRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !path.isEmpty {
+                        operations.insert(RepoFileEditOperation(path: path, kind: .delete, content: ""), at: 0)
+                    }
+                    working.replaceSubrange(fullRange, with: "\nRequested deletion of `\(path)`.")
+                }
+            }
+        }
+
+        return (working.trimmingCharacters(in: .whitespacesAndNewlines), operations)
+    }
+
+    /// Answer 12: Ask before deleting files or changing `.github/workflows/` unless the user already confirmed or enabled Autonomous mode.
+    public static func requiresSafetyConfirmation(
+        operations: [RepoFileEditOperation],
+        userPrompt: String,
+        isAutonomous: Bool = false
+    ) -> NumberedQuestionItem? {
+        if isAutonomous { return nil }
+        let lowerPrompt = userPrompt.lowercased()
+        let alreadyConfirmed = lowerPrompt.contains("yes, go ahead")
+            || lowerPrompt.contains("get on with it")
+            || lowerPrompt.contains("confirm delete")
+            || lowerPrompt.contains("confirm workflow")
+
+        if alreadyConfirmed { return nil }
+
+        let deletes = operations.filter { $0.kind == .delete }.map(\.path)
+        let workflows = operations.filter { $0.path.hasPrefix(".github/workflows/") }.map(\.path)
+
+        if !deletes.isEmpty || !workflows.isEmpty {
+            let affected = (deletes + workflows).joined(separator: ", ")
+            return NumberedQuestionItem(
+                number: 1,
+                prompt: "Confirm before changing workflow or deleting files (\(affected))?",
+                options: ["Yes, go ahead", "No, skip that"]
+            )
+        }
+        return nil
+    }
+
+    // MARK: - Item 5: Picture Generation Inline in Chat
+
+    public static func extractOrGenerateImageURL(from text: String, userPrompt: String) -> (cleanedText: String, imageURL: String?) {
+        var working = text
+        var imageLabel: String? = nil
+
+        if let imgRegex = try? NSRegularExpression(pattern: "\\[GENERATE_IMAGE:\\s*([^\\]]+)\\]", options: [.caseInsensitive]),
+           let match = imgRegex.firstMatch(in: working, options: [], range: NSRange(working.startIndex..., in: working)),
+           let labelRange = Range(match.range(at: 1), in: working),
+           let fullRange = Range(match.range(at: 0), in: working) {
+            imageLabel = String(working[labelRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+            working.replaceSubrange(fullRange, with: "")
+        } else {
+            let lower = userPrompt.lowercased()
+            if lower.contains("generate an image") || lower.contains("draw a picture") || lower.contains("generate a picture") || lower.contains("create an icon") {
+                imageLabel = String(userPrompt.prefix(36))
+            }
+        }
+
+        guard let title = imageLabel, !title.isEmpty else {
+            return (working.trimmingCharacters(in: .whitespacesAndNewlines), nil)
+        }
+
+        let safeTitle = title
+            .replacingOccurrences(of: "&", with: "and")
+            .replacingOccurrences(of: "<", with: "")
+            .replacingOccurrences(of: ">", with: "")
+            .replacingOccurrences(of: "\"", with: "")
+        let svg = """
+        <svg xmlns="http://www.w3.org/2000/svg" width="512" height="320" viewBox="0 0 512 320">
+          <defs>
+            <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stop-color="#1E1B4B"/>
+              <stop offset="50%" stop-color="#4338CA"/>
+              <stop offset="100%" stop-color="#D97706"/>
+            </linearGradient>
+          </defs>
+          <rect width="512" height="320" rx="28" fill="url(#bg)"/>
+          <circle cx="256" cy="135" r="56" fill="#F59E0B" opacity="0.9"/>
+          <circle cx="236" cy="128" r="7" fill="#FFFFFF"/>
+          <circle cx="276" cy="128" r="7" fill="#FFFFFF"/>
+          <text x="256" y="242" fill="#FFFFFF" font-family="-apple-system, sans-serif" font-size="20" font-weight="bold" text-anchor="middle">\(safeTitle)</text>
+          <text x="256" y="272" fill="#E0E7FF" font-family="-apple-system, sans-serif" font-size="13" text-anchor="middle">Generated in MAIPA-G</text>
+        </svg>
+        """
+        let b64 = Data(svg.utf8).base64EncodedString()
+        return (working.trimmingCharacters(in: .whitespacesAndNewlines), "data:image/svg+xml;base64,\(b64)")
     }
 
     public static func buildSpecDocument(for prompt: String, existing: SpecPlanDocument?) -> SpecPlanDocument {

@@ -26,6 +26,7 @@ targets:
     deploymentTarget: "17.0"
     sources:
       - path: Sources
+      - path: Assets.xcassets
     dependencies:
       - package: AgentCore
         product: AgentCore
@@ -34,6 +35,7 @@ targets:
       - sdk: UserNotifications.framework
       - sdk: WebKit.framework
       - sdk: PhotosUI.framework
+      - sdk: BackgroundTasks.framework
     info:
       path: build/Generated/Info.plist
       properties:
@@ -48,6 +50,12 @@ targets:
         LSSupportsOpeningDocumentsInPlace: true
         UILaunchScreen: {}
         UIApplicationSupportsIndirectInputEvents: true
+        UIBackgroundModes:
+          - fetch
+          - processing
+        BGTaskSchedulerPermittedIdentifiers:
+          - dev.maipag.app.refresh
+          - dev.maipag.app.continued-processing
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft
@@ -60,6 +68,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.maipag.app
         PRODUCT_NAME: MAIPA-G
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         GENERATE_INFOPLIST_FILE: NO
         CODE_SIGNING_ALLOWED: NO
         CODE_SIGNING_REQUIRED: NO

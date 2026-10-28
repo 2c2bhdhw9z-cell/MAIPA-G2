@@ -49,6 +49,56 @@ public enum KeychainHelper {
     }
 }
 
+// MARK: - On-Phone GitHub App RS256 JWT Signer (Answer 2c — Security.framework)
+
+public enum GitHubAppRS256Signer {
+    public static func createJWT(appId: Int, pemPrivateKey: String) throws -> String {
+        let now = Int(Date().timeIntervalSince1970)
+        let headerDict: [String: Any] = ["alg": "RS256", "typ": "JWT"]
+        let payloadDict: [String: Any] = [
+            "iat": now - 60,
+            "exp": now + 540,
+            "iss": "\(appId)"
+        ]
+        let headerB64 = PKCEHelper.base64URLEncode(try JSONSerialization.data(withJSONObject: headerDict))
+        let payloadB64 = PKCEHelper.base64URLEncode(try JSONSerialization.data(withJSONObject: payloadDict))
+        let signingInput = "\(headerB64).\(payloadB64)"
+
+        let derData = try stripPEMHeaders(pem: pemPrivateKey)
+        let attributes: [String: Any] = [
+            kSecAttrKeyType as String: kSecAttrKeyTypeRSA,
+            kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,
+            kSecAttrKeySizeInBits as String: 2048
+        ]
+        var error: Unmanaged<CFError>?
+        guard let secKey = SecKeyCreateWithData(derData as CFData, attributes as CFDictionary, &error) else {
+            throw NSError(domain: "GitHubAppRS256Signer", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid RSA private key PEM"])
+        }
+        guard let signatureCF = SecKeyCreateSignature(
+            secKey,
+            .rsaSignatureMessagePKCS1v15SHA256,
+            Data(signingInput.utf8) as CFData,
+            &error
+        ) else {
+            throw NSError(domain: "GitHubAppRS256Signer", code: -2, userInfo: [NSLocalizedDescriptionKey: "Failed to sign RS256 JWT"])
+        }
+        let sigB64 = PKCEHelper.base64URLEncode(signatureCF as Data)
+        return "\(signingInput).\(sigB64)"
+    }
+
+    private static func stripPEMHeaders(pem: String) throws -> Data {
+        let lines = pem
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && !$0.hasPrefix("-----BEGIN") && !$0.hasPrefix("-----END") }
+        let b64 = lines.joined()
+        guard let data = Data(base64Encoded: b64) else {
+            throw NSError(domain: "GitHubAppRS256Signer", code: -3, userInfo: [NSLocalizedDescriptionKey: "Could not decode PEM base64"])
+        }
+        return data
+    }
+}
+
 // MARK: - Web Authentication Session Presenter (OpenRouter PKCE & GitHub Manifest)
 
 @MainActor

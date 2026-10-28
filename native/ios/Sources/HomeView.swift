@@ -675,10 +675,57 @@ public struct HomeView: View {
             }
 
             // Message Bubble
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 8) {
                 Text(msg.text)
                     .font(.body)
                     .foregroundStyle(msg.role == .user ? .white : .primary)
+
+                if let imageURL = msg.generatedImageURL, !imageURL.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "photo.artframe")
+                                .foregroundStyle(accentColor)
+                            Text("Generated Picture")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.primary)
+                            Spacer()
+                            Button("Preview") {
+                                state.livePreviewTitle = "Generated Picture"
+                                state.livePreviewHTML = "<html><body style='margin:0;background:#0d0c14;display:flex;align-items:center;justify-content:center;height:100vh;'><img src='\(imageURL)' style='max-width:94%;border-radius:20px;'/></body></html>"
+                                state.isLivePreviewPresented = true
+                            }
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(accentColor)
+                        }
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(
+                                LinearGradient(
+                                    colors: [Color(red: 0.12, green: 0.11, blue: 0.29), accentColor.opacity(0.85)],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                            .frame(height: 150)
+                            .overlay(
+                                VStack(spacing: 6) {
+                                    Image(systemName: "sparkles.rectangle.stack.fill")
+                                        .font(.system(size: 32))
+                                        .foregroundStyle(.white)
+                                    Text("Tap Preview to view full generated image")
+                                        .font(.caption2)
+                                        .foregroundStyle(.white.opacity(0.9))
+                                }
+                            )
+                            .onTapGesture {
+                                state.livePreviewTitle = "Generated Picture"
+                                state.livePreviewHTML = "<html><body style='margin:0;background:#0d0c14;display:flex;align-items:center;justify-content:center;height:100vh;'><img src='\(imageURL)' style='max-width:94%;border-radius:20px;'/></body></html>"
+                                state.isLivePreviewPresented = true
+                            }
+                    }
+                    .padding(8)
+                    .background(Color(UIColor.tertiarySystemBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
 
                 if !msg.autoSavedMemories.isEmpty {
                     ForEach(msg.autoSavedMemories, id: \.self) { note in
