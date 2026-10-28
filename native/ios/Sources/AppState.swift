@@ -495,14 +495,14 @@ public final class AppState: ObservableObject {
 
         if let manifestCode = items.first(where: { $0.name == "manifest_code" })?.value {
             do {
-                let cred = try await githubService.exchangeManifestCode(code: manifestCode)
+                let cred = try await githubService.exchangeAppManifestCode(manifestCode)
                 KeychainHelper.saveString(cred.pem, forKey: "maipag.github.app.pem")
-                KeychainHelper.saveString("\(cred.id)", forKey: "maipag.github.app.id")
-                let jwt = try GitHubAppRS256Signer.createJWT(appId: cred.id, pemPrivateKey: cred.pem)
-                if let instToken = try? await githubService.createInstallationTokenFromJWT(jwt: jwt) {
-                    await completeGitHubSignIn(withToken: instToken)
+                KeychainHelper.saveString("\(cred.appId)", forKey: "maipag.github.app.id")
+                let jwt = try GitHubAppRS256Signer.createJWT(appId: cred.appId, pemPrivateKey: cred.pem)
+                if let inst = try? await githubService.createInstallationTokenFromJWT(jwt: jwt) {
+                    await completeGitHubSignIn(withToken: inst.token)
                 } else {
-                    statusBannerText = "Created GitHub App \(cred.name). Install it on your account to finish connecting."
+                    statusBannerText = "Created GitHub App \(cred.slug). Install it on your account to finish connecting."
                 }
                 return
             } catch {
