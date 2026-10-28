@@ -2,7 +2,25 @@ import Foundation
 import SwiftUI
 import UIKit
 import UserNotifications
+#if canImport(FoundationModels)
+import FoundationModels
+#endif
 import AgentCore
+
+public enum OnDeviceFoundationHelper {
+    public static func generateShortChatTitle(for prompt: String) -> String {
+        let cleaned = prompt
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let words = cleaned
+            .components(separatedBy: .whitespaces)
+            .filter { !$0.isEmpty }
+        if words.count <= 6 {
+            return String(cleaned.prefix(38))
+        }
+        return words.prefix(6).joined(separator: " ")
+    }
+}
 
 @MainActor
 public final class AppState: ObservableObject {
@@ -475,6 +493,23 @@ public final class AppState: ObservableObject {
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return }
         let items = components.queryItems ?? []
 
+        if let manifestCode = items.first(where: { $0.name == "manifest_code" })?.value {
+            do {
+                let cred = try await githubService.exchangeAppManifestCode(manifestCode)
+                KeychainHelper.saveString(cred.pem, forKey: "maipag.github.app.pem")
+                KeychainHelper.saveString("\(cred.appId)", forKey: "maipag.github.app.id")
+                let jwt = try GitHubAppRS256Signer.createJWT(appId: cred.appId, pemPrivateKey: cred.pem)
+                if let inst = try? await githubService.createInstallationTokenFromJWT(jwt: jwt) {
+                    await completeGitHubSignIn(withToken: inst.token)
+                } else {
+                    statusBannerText = "Created GitHub App \(cred.slug). Install it on your account to finish connecting."
+                }
+                return
+            } catch {
+                statusBannerText = error.localizedDescription
+            }
+        }
+
         if let code = items.first(where: { $0.name == "code" })?.value {
             if let verifier = pendingPKCEVerifier {
                 do {
@@ -617,7 +652,7 @@ public final class AppState: ObservableObject {
         let userMsg = ChatMessage(role: .user, text: promptToSend, attachments: attachmentsSnapshot)
         chats[chatIdx].messages.append(userMsg)
         if chats[chatIdx].messages.count == 1 {
-            chats[chatIdx].title = String(promptToSend.prefix(38))
+            chats[chatIdx].title = OnDeviceFoundationHelper.generateShortChatTitle(for: promptToSend)
         }
         chats[chatIdx].updatedAt = Date()
 
@@ -680,6 +715,11 @@ public final class AppState: ObservableObject {
             chats[cIdx].messages[mIdx].questions = result.questions
             chats[cIdx].messages[mIdx].autoSavedMemories = result.autoSavedMemories
             chats[cIdx].messages[mIdx].stopAndAskTriggered = result.pausedForCostLimit
+            chats[cIdx].messages[mIdx].generatedImageURL = result.generatedImageURL
+            if let receipt = result.savedChangeReceipt {
+                chats[cIdx].messages[mIdx].savedChangeReceipt = receipt
+                chats[cIdx].lastSavedReceipt = receipt
+            }
             if let spec = result.generatedSpec, chats[cIdx].specDocument == nil {
                 chats[cIdx].specDocument = spec
             }

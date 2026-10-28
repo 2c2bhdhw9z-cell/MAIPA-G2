@@ -1,0 +1,47 @@
+name: MAIPA-G Autonomous Runner
+
+on:
+  workflow_call:
+    inputs:
+      target_repo:
+        required: true
+        type: string
+      target_branch:
+        required: true
+        type: string
+      job_id:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      target_repo:
+        description: "Target repository (owner/name)"
+        required: false
+        default: "2c2bhdhw9z-cell/MAIPA-G2"
+      target_branch:
+        description: "Target branch"
+        required: false
+        default: "main"
+      job_id:
+        description: "Autonomous job identifier"
+        required: false
+        default: "manual-run"
+
+jobs:
+  autonomous:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 345
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout MAIPA-G AgentCore
+        uses: actions/checkout@v4
+
+      - name: Run Autonomous Cloud Agent Step
+        working-directory: Packages/AgentCore
+        env:
+          MAIPAG_JOB_ID: ${{ inputs.job_id }}
+          MAIPAG_TARGET_REPO: ${{ inputs.target_repo }}
+          MAIPAG_TARGET_BRANCH: ${{ inputs.target_branch }}
+        run: |
+          swift run maipa-g-runner --autonomous-job "$MAIPAG_JOB_ID" "$MAIPAG_TARGET_REPO" "$MAIPAG_TARGET_BRANCH"

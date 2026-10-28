@@ -541,14 +541,108 @@ public final class GitHubService: @unchecked Sendable {
         }
     }
 
-    public func triggerWorkflowDispatch(fullName: String, workflowFileName: String = "ios.yml", ref: String = "main", token: String) async throws {
-        let body: [String: Any] = ["ref": ref]
+    public func triggerWorkflowDispatch(fullName: String, workflowFileName: String = "ios.yml", ref: String = "main", inputs: [String: String]? = nil, token: String) async throws {
+        var body: [String: Any] = ["ref": ref]
+        if let inputs = inputs {
+            body["inputs"] = inputs
+        }
         _ = try await githubRequest(
             method: "POST",
             path: "/repos/\(fullName)/actions/workflows/\(workflowFileName)/dispatches",
             token: token,
             bodyJSON: body
         )
+    }
+
+    /// Answer 16 & lines 240–251: The first time Autonomous is used on a repo, adds `.github/workflows/maipa-g.yml`
+    /// with `[skip ci]` so it does not trigger that repo's own build, then dispatches the autonomous cloud runner.
+    public func ensureAutonomousCallerWorkflowAndRun(fullName: String, branch: String, jobId: String, token: String) async throws {
+        let workflowPath = ".github/workflows/maipa-g.yml"
+        let callerYAML = """
+        name: MAIPA-G Autonomous Job
+        on:
+          workflow_dispatch:
+            inputs:
+              job_id:
+                description: "MAIPA-G Autonomous Job ID"
+                required: true
+        jobs:
+          run-agent:
+            uses: \(Self.maipaGRepoFullName)/.github/workflows/autonomous-runner.yml@main
+            with:
+              target_repo: \(fullName)
+              target_branch: \(branch)
+              job_id: ${{ inputs.job_id }}
+        """
+
+        if (try? await fetchFileContent(fullName: fullName, path: workflowPath, branch: branch, token: token)) == nil {
+            let b64 = Data(callerYAML.utf8).base64EncodedString()
+            let putBody: [String: Any] = [
+                "message": "Add MAIPA-G autonomous caller workflow [skip ci]",
+                "content": b64,
+                "branch": branch,
+                "committer": [
+                    "name": "MAIPA-G",
+                    "email": "maipa-g@users.noreply.github.com"
+                ]
+            ]
+            _ = try? await githubRequest(method: "PUT", path: "/repos/\(fullName)/contents/\(workflowPath)", token: token, bodyJSON: putBody)
+        }
+
+        // Dispatch the autonomous runner workflow
+        try? await triggerWorkflowDispatch(
+            fullName: Self.maipaGRepoFullName,
+            workflowFileName: "autonomous-runner.yml",
+            ref: "main",
+            inputs: [
+                "target_repo": fullName,
+                "target_branch": branch,
+                "job_id": jobId
+            ],
+            token: token
+        )
+    }
+
+    /// Answer 10: When MAIPA-G changes code in Continuum, updates Continuum's "Only Kiro works on this repository" rule to allow MAIPA-G too.
+    public func allowMAIPAGInContinuumRulesIfNeeded(fullName: String, branch: String, token: String) async {
+        guard fullName.lowercased().contains("continuum"), !token.isEmpty else { return }
+        for rulePath in [".kiro/steering/owner-rules.md", "AGENTS.md", "CLAUDE.md"] {
+            if let existing = try? await fetchFileContent(fullName: fullName, path: rulePath, branch: branch, token: token),
+               existing.contains("Only Kiro works on this repository") && !existing.contains("MAIPA-G") {
+                let updated = existing.replacingOccurrences(
+                    of: "Only Kiro works on this repository",
+                    with: "Only Kiro and MAIPA-G (the owner's own iPhone app) work on this repository"
+                )
+                let op = RepoFileEditOperation(path: rulePath, kind: .update, content: updated)
+                _ = try? await saveChangesToRepo(
+                    fullName: fullName,
+                    pickedBranch: branch,
+                    defaultBranch: branch,
+                    commitMessage: "Allow MAIPA-G alongside Kiro in repository rules [skip ci]",
+                    operations: [op],
+                    settings: AppSettings(),
+                    token: token
+                )
+            }
+        }
+    }
+
+    /// Technical notes lines 215–217: Uses an on-phone RS256-signed GitHub App JWT to mint a fresh installation token.
+    public func createInstallationTokenFromJWT(jwt: String) async throws -> (token: String, accountLogin: String) {
+        let instData = try await githubRequest(method: "GET", path: "/app/installations", token: jwt, bodyJSON: nil)
+        guard let arr = try JSONSerialization.jsonObject(with: instData) as? [[String: Any]],
+              let first = arr.first,
+              let instId = first["id"] as? Int else {
+            throw GitHubServiceError.decodingError("No GitHub App installations found yet")
+        }
+        let account = first["account"] as? [String: Any]
+        let login = (account?["login"] as? String) ?? "github-user"
+        let tokData = try await githubRequest(method: "POST", path: "/app/installations/\(instId)/access_tokens", token: jwt, bodyJSON: [:])
+        guard let tokJSON = try JSONSerialization.jsonObject(with: tokData) as? [String: Any],
+              let instToken = tokJSON["token"] as? String else {
+            throw GitHubServiceError.decodingError("Could not mint GitHub App installation token")
+        }
+        return (instToken, login)
     }
 
     // MARK: - Build 5: Official MCP Registry Live Search (40,000+ Connectors — Answer 28)
