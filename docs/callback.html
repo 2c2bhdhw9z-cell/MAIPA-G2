@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Returning to MAIPA-G…</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 24px;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+      background: #0d0d11;
+      color: #f4f4f6;
+      display: flex;
+      min-height: 100vh;
+      align-items: center;
+      justify-content: center;
+    }
+    .card {
+      max-width: 380px;
+      width: 100%;
+      background: #17171f;
+      border: 1px solid #2b2b38;
+      border-radius: 18px;
+      padding: 24px;
+      text-align: center;
+    }
+    h1 { font-size: 19px; margin: 0 0 8px; }
+    p { font-size: 14px; color: #a1a1b5; margin: 0 0 18px; }
+    .btn {
+      display: block;
+      padding: 13px 16px;
+      border-radius: 12px;
+      background: #8b5cf6;
+      color: #fff;
+      font-weight: 600;
+      text-decoration: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Connected</h1>
+    <p>Tap below if MAIPA-G does not open automatically.</p>
+    <a id="bounceLink" class="btn" href="maipag://oauth-callback">Return to MAIPA-G</a>
+  </div>
+  <script>
+    (function () {
+      var target = "maipag://oauth-callback" + window.location.search + window.location.hash;
+      document.getElementById("bounceLink").href = target;
+      window.location.replace(target);
+    })();
+  </script>
+</body>
+</html>

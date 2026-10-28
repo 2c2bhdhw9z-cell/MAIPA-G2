@@ -1,0 +1,75 @@
+name: MAIPA-G
+
+options:
+  bundleIdPrefix: dev.maipag
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+
+packages:
+  AgentCore:
+    path: ../../Packages/AgentCore
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+    TARGETED_DEVICE_FAMILY: "1"
+    SUPPORTS_MACCATALYST: NO
+    SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
+
+targets:
+  MAIPA-G:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: Sources
+    dependencies:
+      - package: AgentCore
+        product: AgentCore
+      - sdk: AuthenticationServices.framework
+      - sdk: Security.framework
+      - sdk: UserNotifications.framework
+    info:
+      path: build/Generated/Info.plist
+      properties:
+        CFBundleDisplayName: MAIPA-G
+        CFBundleName: MAIPA-G
+        CFBundleIdentifier: dev.maipag.app
+        CFBundleShortVersionString: "1.0.0"
+        CFBundleVersion: "1"
+        LSRequiresIPhoneOS: true
+        MinimumOSVersion: "17.0"
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        UILaunchScreen: {}
+        UIApplicationSupportsIndirectInputEvents: true
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        CFBundleURLTypes:
+          - CFBundleURLName: dev.maipag.app.oauth
+            CFBundleURLSchemes:
+              - maipag
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.maipag.app
+        PRODUCT_NAME: MAIPA-G
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGNING_ALLOWED: NO
+        CODE_SIGNING_REQUIRED: NO
+        CODE_SIGN_IDENTITY: ""
+        ENABLE_BITCODE: NO
+
+schemes:
+  MAIPA-G:
+    build:
+      targets:
+        MAIPA-G: all
+    run:
+      config: Release
+    archive:
+      config: Release

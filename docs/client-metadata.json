@@ -1,0 +1,17 @@
+{
+  "client_id": "https://2c2bhdhw9z-cell.github.io/MAIPA-G2/client-metadata.json",
+  "client_name": "MAIPA-G",
+  "client_uri": "https://github.com/2c2bhdhw9z-cell/MAIPA-G2",
+  "redirect_uris": [
+    "https://2c2bhdhw9z-cell.github.io/MAIPA-G2/callback.html",
+    "maipag://oauth-callback"
+  ],
+  "grant_types": [
+    "authorization_code",
+    "refresh_token"
+  ],
+  "response_types": [
+    "code"
+  ],
+  "token_endpoint_auth_method": "none"
+}

@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MAIPA-G Sign-In</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 24px;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+      background: #0d0d11;
+      color: #f4f4f6;
+      display: flex;
+      min-height: 100vh;
+      align-items: center;
+      justify-content: center;
+    }
+    .card {
+      max-width: 400px;
+      width: 100%;
+      background: #17171f;
+      border: 1px solid #2b2b38;
+      border-radius: 18px;
+      padding: 24px;
+      text-align: center;
+    }
+    h1 { font-size: 20px; margin: 0 0 10px; }
+    p { font-size: 14px; color: #a1a1b5; line-height: 1.5; margin: 0 0 20px; }
+    .btn {
+      display: inline-block;
+      width: 100%;
+      box-sizing: border-box;
+      padding: 13px 18px;
+      border-radius: 12px;
+      background: #8b5cf6;
+      color: #fff;
+      font-weight: 600;
+      font-size: 15px;
+      text-decoration: none;
+      border: none;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1 id="title">MAIPA-G</h1>
+    <p id="desc">Returning you to the MAIPA-G iPhone app…</p>
+    <a id="openBtn" class="btn" href="maipag://oauth-callback">Open MAIPA-G</a>
+    <form id="manifestForm" method="post" action="https://github.com/settings/apps/new" style="display:none; margin-top:12px;">
+      <input type="hidden" name="manifest" id="manifestInput" />
+      <button type="submit" class="btn">Continue to GitHub</button>
+    </form>
+  </div>
+  <script>
+    (function () {
+      var params = new URLSearchParams(window.location.search);
+      if (params.get("mode") === "github-manifest") {
+        var callbackUrl = window.location.origin + window.location.pathname.replace(/\/[^\/]*$/, "/callback.html");
+        var suffix = Math.floor(1000 + Math.random() * 9000);
+        var manifest = {
+          name: "MAIPA-G-" + suffix,
+          url: "https://github.com/2c2bhdhw9z-cell/MAIPA-G2",
+          redirect_url: callbackUrl + "?provider=github_manifest",
+          callback_urls: [callbackUrl],
+          setup_url: callbackUrl + "?provider=github_install",
+          public: true,
+          default_permissions: {
+            contents: "write",
+            pull_requests: "write",
+            actions: "write",
+            workflows: "write",
+            metadata: "read",
+            administration: "write",
+            secrets: "write"
+          }
+        };
+        document.getElementById("title").textContent = "Connect GitHub to MAIPA-G";
+        document.getElementById("desc").textContent = "Tap below to create and allow your personal MAIPA-G GitHub connection with no keys to copy.";
+        document.getElementById("openBtn").style.display = "none";
+        var form = document.getElementById("manifestForm");
+        document.getElementById("manifestInput").value = JSON.stringify(manifest);
+        form.style.display = "block";
+        form.submit();
+        return;
+      }
+      var target = "maipag://oauth-callback" + window.location.search + window.location.hash;
+      document.getElementById("openBtn").href = target;
+      if (window.location.search) {
+        window.location.replace(target);
+      }
+    })();
+  </script>
+</body>
+</html>
